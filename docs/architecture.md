@@ -30,7 +30,8 @@
     - listen to requests and create records to the `job_status` table.
 - cmd/worker
     - run on a vast.ai node
-    - read from the `job_status` table and run the job
+    - loop
+        - read from the `job_status` table and run the job
 - clean up worker
     - archive records on `worker_auth_token_status` that is more than 1 month old
     - archive records on `instance_status` that is more than 1 year old
