@@ -14,6 +14,21 @@ message AuthenticateWorkerResponse {
   bool authenticated = 1;
 }
 
+// Request message for getting the next available job.
+// Can be empty if no specific parameters are needed from the worker.
+message GetNextJobRequest {
+  // Could potentially add worker capabilities here in the future
+  // string worker_type = 1;
+  // map<string, string> capabilities = 2;
+}
+
+// The response message containing the job details.
+// Reusing GetJobResponse structure is likely fine.
+message GetJobResponse {
+  int64 job_id = 1;
+  string input = 2;
+}
+
 // The request message containing the job ID.
 message GetJobRequest {
   int64 job_id = 1;
@@ -32,19 +47,25 @@ message SubmitJobResultRequest {
   string error = 3;
 }
 
-// The response message indicating success or failure.
-message SubmitJobResultResponse {
-  bool success = 1;
-}
-
 // The greeting service definition.
 service WorkerService {
   // Authenticates a worker.
   rpc AuthenticateWorker (AuthenticateWorkerRequest) returns (AuthenticateWorkerResponse) {}
 
-  // Gets a job for the worker.
-  rpc GetJob (GetJobRequest) returns (GetJobResponse) {}
+  // Gets the next available job for the authenticated worker.
+  // The server uses the authenticated context to find a suitable job.
+  // Should return a gRPC NotFound error if no job is available.
+  rpc GetNextJob (GetNextJobRequest) returns (GetJobResponse) {}
 
   // Submit job result.
   rpc SubmitJobResult (SubmitJobResultRequest) returns (SubmitJobResultResponse) {}
+
+  // Optional: Keep GetJob if needed for other purposes (e.g., admin querying specific job status)
+  // rpc GetJob (GetJobRequest) returns (GetJobResponse) {}
 }
+
+// Message for getting a specific job's details (if keeping GetJob)
+// message GetJobRequest {
+//   int64 job_id = 1;
+// }
+
