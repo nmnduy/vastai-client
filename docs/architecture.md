@@ -24,7 +24,7 @@
             - `token_id` to group events that happen to the same token
             - `token` the unique auth token value generated for a worker instance
             - `instance_id` for the vast ai instance id the token is associated with
-            - `status` column: one of `created`, `validated`, `expired`, `invalidated` # Describes the state change of the token
+            - `status` column: one of `created`, `validated`, `invalidated`
             - `created_at` column for the time the record was created. use timescaledb optimization with this column as ref.
 - cmd/server
     - listen to requests and create records to the `job_status` table.
@@ -39,4 +39,4 @@
 
 When we start a Vast node we have to give it a one-time token that will allow it to call our API to get a list of jobs for it. The token will expire after 1 hour and it can't be used again. The token will be provided via the environment variable `WORKER_AUTH_TOKEN`
 
-We use gRPC instead of HTTP for better performance. Also I should learn it at some point so the time is now.
+We use gRPC instead of HTTP for better performance.
