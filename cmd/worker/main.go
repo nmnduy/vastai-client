@@ -3,99 +3,228 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"os"
-	"strconv"
+	"os/signal"
+	"syscall"
 	"time"
 
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
+	pb "internal/grpc" // Import the generated protobuf code
 
-	pb "internal/grpc"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
+)
+
+const (
+	// workerStatusCreated represents the initial status when a worker starts.
+	workerStatusCreated = "created"
+	// workerStatusAuthenticated represents the status after successful authentication.
+	workerStatusAuthenticated = "authenticated"
+	// workerStatusRunning represents the status when the worker is actively processing jobs.
+	workerStatusRunning = "running"
+	// workerStatusStopped represents the status when the worker is shutting down.
+	workerStatusStopped = "stopped"
+)
+
+var (
+	serverAddr  = flag.String("addr", "localhost:50051", "The server address in the format host:port")
+	workerToken string
 )
 
 func main() {
-	// --- Configuration ---
-	authToken := os.Getenv("WORKER_AUTH_TOKEN")
-	if authToken == "" {
+	flag.Parse()
+
+	// Get authentication token from environment variable
+	workerToken = os.Getenv("WORKER_AUTH_TOKEN")
+	if workerToken == "" {
 		log.Fatal("WORKER_AUTH_TOKEN environment variable not set")
 	}
 
-	serverAddr := os.Getenv("GRPC_SERVER_ADDRESS")
-	if serverAddr == "" {
-		serverAddr = "localhost:50051" // Default server address
-	}
-
-	jobIDStr := flag.String("job-id", "", "The ID of the job to fetch and execute")
-	flag.Parse()
-
-	if *jobIDStr == "" {
-		log.Fatal("--job-id flag is required")
-	}
-
-	jobID, err := strconv.ParseInt(*jobIDStr, 10, 64)
+	// Set up a connection to the server.
+	// TODO: Implement secure credentials (TLS) for production environments.
+	conn, err := grpc.Dial(*serverAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
-		log.Fatalf("Invalid job-id: %v", err)
-	}
-
-	// --- gRPC Connection ---
-	log.Printf("Connecting to gRPC server at %s", serverAddr)
-	conn, err := grpc.Dial(serverAddr, grpc.WithTransportCredentials(insecure.NewCredentials())) // Note: Using insecure credentials
-	if err != nil {
-		log.Fatalf("Failed to connect to gRPC server: %v", err)
+		log.Fatalf("Failed to connect to server: %v", err)
 	}
 	defer conn.Close()
 
 	client := pb.NewWorkerServiceClient(conn)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute) // Add a timeout for RPC calls
+	log.Printf("Connected to server at %s", *serverAddr)
+
+	// Create a context that can be cancelled on shutdown signals
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// --- Authentication ---
-	log.Printf("Authenticating worker...")
-	authReq := &pb.AuthenticateWorkerRequest{Token: authToken}
-	authResp, err := client.AuthenticateWorker(ctx, authReq)
-	if err != nil {
-		log.Fatalf("Authentication failed: %v", err)
-	}
-	if !authResp.Authenticated {
-		log.Fatal("Worker authentication rejected by server.")
+	// Handle OS signals for graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigChan
+		log.Println("Shutdown signal received, cancelling context...")
+		cancel() // Cancel the main context
+	}()
+
+	// 1. Authenticate the worker
+	if !authenticate(ctx, client) {
+		log.Fatal("Worker authentication failed. Exiting.")
+		return // Exit if authentication fails
 	}
 	log.Println("Worker authenticated successfully.")
 
-	// --- Get Job ---
-	log.Printf("Requesting job %d...", jobID)
-	getJobReq := &pb.GetJobRequest{JobId: jobID}
-	jobResp, err := client.GetJob(ctx, getJobReq)
+	// 2. Start the main worker loop
+	runWorkerLoop(ctx, client)
+
+	log.Println("Worker loop finished. Exiting.")
+}
+
+// authenticate attempts to authenticate the worker with the server.
+func authenticate(ctx context.Context, client pb.WorkerServiceClient) bool {
+	req := &pb.AuthenticateWorkerRequest{Token: workerToken}
+	log.Printf("Attempting to authenticate worker with token prefix: %s...", getTokenPrefix(workerToken))
+
+	authCtx, cancel := context.WithTimeout(ctx, 10*time.Second) // Timeout for authentication
+	defer cancel()
+
+	resp, err := client.AuthenticateWorker(authCtx, req)
 	if err != nil {
-		log.Fatalf("Failed to get job %d: %v", jobID, err)
+		log.Printf("Authentication request failed: %v", err)
+		return false
 	}
-	log.Printf("Received job %d with input: %.50s...", jobResp.JobId, jobResp.Input) // Log truncated input
 
-	// --- Simulate Job Execution ---
-	log.Printf("Starting job %d...", jobID)
-	// Replace this section with actual job processing logic
-	time.Sleep(5 * time.Second) // Simulate work
-	jobResult := "Successfully processed input: " + jobResp.Input
-	jobError := "" // Assume success for now
-	log.Printf("Finished job %d.", jobID)
+	if !resp.Authenticated {
+		log.Println("Server rejected authentication token.")
+		return false
+	}
 
-	// --- Submit Result ---
-	log.Printf("Submitting result for job %d...", jobID)
+	return true
+}
+
+// runWorkerLoop continuously fetches and processes jobs until the context is cancelled.
+func runWorkerLoop(ctx context.Context, client pb.WorkerServiceClient) {
+	log.Println("Starting worker loop...")
+	ticker := time.NewTicker(5 * time.Second) // Poll for jobs every 5 seconds
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("Context cancelled, stopping worker loop.")
+			return // Exit loop if context is cancelled
+		case <-ticker.C:
+			// Try to fetch and process one job
+			jobAvailable, err := fetchAndProcessJob(ctx, client)
+			if err != nil {
+				log.Printf("Error fetching/processing job: %v. Will retry.", err)
+				// Optional: Implement backoff strategy here
+			} else if !jobAvailable {
+				log.Println("No job available currently. Will check again.")
+			}
+			// If a job was processed successfully (jobAvailable=true, err=nil), the loop continues immediately for the next tick.
+		}
+	}
+}
+
+// fetchAndProcessJob tries to get a job, process it, and submit the result.
+// Returns true if a job was found and processed (or attempted), false if no job was available.
+func fetchAndProcessJob(ctx context.Context, client pb.WorkerServiceClient) (jobAvailable bool, err error) {
+	// TODO: The current GetJob RPC requires a job_id, but the worker needs to ask for *any* available job.
+	// This assumes the server interprets a specific job_id (e.g., 0 or -1) as a request for the next available job,
+	// or associates the job based on the authenticated worker context.
+	// A better approach would be a dedicated RPC like `GetNextAvailableJob() returns (GetJobResponse)`.
+	req := &pb.GetJobRequest{JobId: 0} // Using 0 as a placeholder for "next available job"
+	log.Println("Requesting next available job...")
+
+	getJobCtx, cancel := context.WithTimeout(ctx, 15*time.Second) // Timeout for getting a job
+	defer cancel()
+
+	resp, err := client.GetJob(getJobCtx, req)
+	if err != nil {
+		// Check if the error is 'NotFound' indicating no job is available
+		st, ok := status.FromError(err)
+		if ok && st.Code() == codes.NotFound {
+			return false, nil // No job available is not an error for the loop
+		}
+		return false, fmt.Errorf("failed to get job: %w", err)
+	}
+
+	// Check if a valid job was returned (e.g., non-zero JobId)
+	// The server should return a non-nil response with JobId=0 or empty input if no job is ready.
+	if resp == nil || resp.JobId == 0 || resp.Input == "" {
+		log.Println("Server indicated no job available.")
+		return false, nil // No job available
+	}
+
+	log.Printf("Received job ID: %d", resp.JobId)
+	jobAvailable = true // A job was received
+
+	// Process the job
+	// Use a separate context for job processing itself, potentially with its own timeout
+	// Link it to the main context so cancellation propagates
+	jobProcessCtx, jobCancel := context.WithCancel(ctx)
+	defer jobCancel()
+
+	result, processErr := processJob(jobProcessCtx, resp.JobId, resp.Input)
+
+	// Submit the result
+	submitCtx, submitCancel := context.WithTimeout(ctx, 10*time.Second) // Timeout for submitting result
+	defer submitCancel()
+
 	submitReq := &pb.SubmitJobResultRequest{
-		JobId:  jobID,
-		Result: jobResult,
-		Error:  jobError,
+		JobId:  resp.JobId,
+		Result: result,
 	}
-	submitResp, err := client.SubmitJobResult(ctx, submitReq)
-	if err != nil {
-		log.Fatalf("Failed to submit job result for job %d: %v", jobID, err)
-	}
-
-	if submitResp.Success {
-		log.Printf("Successfully submitted result for job %d.", jobID)
+	if processErr != nil {
+		log.Printf("Job %d failed: %v", resp.JobId, processErr)
+		submitReq.Error = processErr.Error() // Assign error message
 	} else {
-		log.Printf("Server failed to accept result for job %d.", jobID)
+		log.Printf("Job %d completed successfully.", resp.JobId)
 	}
 
-	log.Println("Worker finished.")
+	_, submitErr := client.SubmitJobResult(submitCtx, submitReq)
+	if submitErr != nil {
+		// Log the submission error, but the original processing error (if any) is more important
+		log.Printf("Failed to submit result for job %d: %v", resp.JobId, submitErr)
+		// Decide if this should be returned as the primary error.
+		// If submission fails, the server might not know the job finished/failed.
+		// Retrying submission might be necessary in a robust implementation.
+		return jobAvailable, fmt.Errorf("failed to submit job result for job %d: %w (processing error: %v)", resp.JobId, submitErr, processErr)
+	}
+
+	log.Printf("Successfully submitted result for job %d", resp.JobId)
+	return jobAvailable, processErr // Return the error from processing, if any
+}
+
+// processJob simulates the actual work being done for a job.
+// Replace this with your actual job processing logic.
+func processJob(ctx context.Context, jobID int64, input string) (result string, err error) {
+	log.Printf("Starting processing job ID: %d, Input: %s", jobID, input)
+
+	// Simulate work with a sleep, checking for context cancellation
+	select {
+	case <-time.After(10 * time.Second): // Simulate 10 seconds of work
+		// Simulate potential errors based on input or other factors
+		if input == "fail_me" {
+			return "", fmt.Errorf("job %d failed intentionally based on input", jobID)
+		}
+		log.Printf("Finished processing job ID: %d", jobID)
+		return fmt.Sprintf("Result for job %d with input '%s'", jobID, input), nil
+	case <-ctx.Done():
+		log.Printf("Job %d processing cancelled.", jobID)
+		return "", ctx.Err() // Return context error (e.g., context.Canceled)
+	}
+}
+
+// getTokenPrefix returns the first few characters of a token for logging, avoiding exposing the full token.
+func getTokenPrefix(token string) string {
+	prefixLen := 8
+	if len(token) < prefixLen {
+		prefixLen = len(token)
+	}
+	if prefixLen <= 0 {
+		return ""
+	}
+	return token[:prefixLen]
 }
