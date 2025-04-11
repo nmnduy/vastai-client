@@ -191,23 +191,26 @@ func (db *DB) GetWorkerAuthToken(ctx context.Context, token string) (*WorkerAuth
 	return &workerAuthToken, nil
 }
 
-// DeleteOldWorkerAuthTokens deletes worker auth tokens older than 1 month.
-func (db *DB) DeleteOldWorkerAuthTokens(ctx context.Context) error {
-	query := `DELETE FROM worker_auth_token WHERE created_at < NOW() - INTERVAL '1 month'`
-	_, err := db.Conn.ExecContext(ctx, query)
+// DeleteOldWorkerAuthTokens deletes worker auth tokens older than the specified retention period.
+func (db *DB) DeleteOldWorkerAuthTokens(ctx context.Context, retentionPeriod time.Duration) error {
+	cutoffTime := time.Now().Add(-retentionPeriod)
+	query := `DELETE FROM worker_auth_token WHERE created_at < $1`
+	_, err := db.Conn.ExecContext(ctx, query, cutoffTime)
 	return err
 }
 
-// DeleteOldInstanceStatuses deletes instance statuses older than 1 year.
-func (db *DB) DeleteOldInstanceStatuses(ctx context.Context) error {
-	query := `DELETE FROM instance_status WHERE created_at < NOW() - INTERVAL '1 year'`
-	_, err := db.Conn.ExecContext(ctx, query)
+// DeleteOldInstanceStatuses deletes instance statuses older than the specified retention period.
+func (db *DB) DeleteOldInstanceStatuses(ctx context.Context, retentionPeriod time.Duration) error {
+	cutoffTime := time.Now().Add(-retentionPeriod)
+	query := `DELETE FROM instance_status WHERE created_at < $1`
+	_, err := db.Conn.ExecContext(ctx, query, cutoffTime)
 	return err
 }
 
-// DeleteOldJobStatuses deletes job statuses older than 3 months.
-func (db *DB) DeleteOldJobStatuses(ctx context.Context) error {
-	query := `DELETE FROM job_status WHERE created_at < NOW() - INTERVAL '3 months'`
-	_, err := db.Conn.ExecContext(ctx, query)
+// DeleteOldJobStatuses deletes job statuses older than the specified retention period.
+func (db *DB) DeleteOldJobStatuses(ctx context.Context, retentionPeriod time.Duration) error {
+	cutoffTime := time.Now().Add(-retentionPeriod)
+	query := `DELETE FROM job_status WHERE created_at < $1`
+	_, err := db.Conn.ExecContext(ctx, query, cutoffTime)
 	return err
 }
