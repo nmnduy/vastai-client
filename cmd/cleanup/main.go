@@ -11,8 +11,7 @@ import (
 	"time"
 
 	"github.com/nmnduy/vastai-client/internal/db"
-	// TODO: Import S3 client library when implemented
-	// "github.com/nmnduy/vastai-client/internal/s3"
+	"github.com/nmnduy/vastai-client/internal/s3"
 	// TODO: Import a Parquet writer library (e.g., github.com/parquet-go/parquet-go)
 	// in the `db` package where streaming happens.
 )
@@ -25,32 +24,12 @@ const (
 )
 
 // S3Uploader defines the interface for uploading data streams to S3.
-// This allows mocking for tests.
+// This allows using the real S3 client or mocks for testing.
 type S3Uploader interface {
 	UploadStream(ctx context.Context, bucket, key string, body io.Reader) error
 }
 
-// mockS3Client is a placeholder implementation of S3Uploader.
-// Replace with your actual S3 client implementation.
-type mockS3Client struct{}
-
-func (m *mockS3Client) UploadStream(ctx context.Context, bucket, key string, body io.Reader) error {
-	// In a real implementation, this would use the AWS SDK or similar
-	// to upload the stream from body to s3://bucket/key.
-	log.Printf("[Mock S3] Uploading stream to s3://%s/%s", bucket, key)
-	// Simulate reading the stream to avoid blocking
-	_, err := io.Copy(io.Discard, body)
-	if err != nil {
-		log.Printf("[Mock S3] Error reading stream during mock upload: %v", err)
-		return fmt.Errorf("mock s3 upload failed: %w", err)
-	}
-	log.Printf("[Mock S3] Successfully uploaded stream to s3://%s/%s", bucket, key)
-	// Simulate potential context cancellation during upload
-	if ctx.Err() != nil {
-		return fmt.Errorf("mock s3 context cancelled: %w", ctx.Err())
-	}
-	return nil // Simulate success
-}
+var _ S3Uploader = (*s3.Client)(nil)
 
 func main() {
 	log.Println("Starting cleanup job...")
@@ -68,7 +47,7 @@ func main() {
 	if s3Bucket == "" {
 		log.Fatal("S3_BUCKET environment variable is required")
 	}
-	// TODO: Add S3 region and credentials handling if needed by the S3 client
+	// S3 client will automatically use AWS env vars like AWS_REGION, AWS_ACCESS_KEY_ID, etc.
 
 	// --- Initialization ---
 	dbClient, err := db.NewDB(ctx)
@@ -82,14 +61,13 @@ func main() {
 	}()
 	log.Println("Database connection established.")
 
-	// TODO: Initialize S3 client
-	// s3Client, err := s3.NewClient(ctx, /* region, credentials, etc. */)
-	// if err != nil {
-	// 	log.Fatalf("Failed to initialize S3 client: %v", err)
-	// }
-	// log.Println("S3 client initialized.")
-	// Placeholder S3 client
-	s3Client := &mockS3Client{} // Replace with real client
+	// Initialize the real S3 client
+	s3Client, err := s3.NewClient(ctx)
+	if err != nil {
+		log.Fatalf("Failed to initialize S3 client: %v", err)
+	}
+	log.Println("S3 client initialized.")
+	// Removed placeholder S3 client instantiation
 
 	// --- Run Cleanup ---
 	log.Println("Running cleanup process...")
@@ -105,7 +83,9 @@ func main() {
 }
 
 // runCleanupCycle performs one full cleanup cycle for all tables.
+// No changes needed in this function or below as it uses the S3Uploader interface.
 func runCleanupCycle(ctx context.Context, dbClient *db.DB, s3Client S3Uploader, s3Bucket string) {
+	// ... rest of the function remains the same ...
 	log.Println("Starting cleanup cycle...")
 
 	// Define cleanup tasks for each table
@@ -123,7 +103,12 @@ func runCleanupCycle(ctx context.Context, dbClient *db.DB, s3Client S3Uploader, 
 			streamFunc: func(ctx context.Context, retention time.Duration) (io.Reader, int64, error) {
 				// TODO: Implement db.StreamOldWorkerAuthTokensAsParquet(ctx, retention)
 				log.Printf("Placeholder: Streaming %s older than %v as Parquet", "worker_auth_token", retention)
+				// Simulate no data for now to avoid blocking on unimplemented feature
+				// In real implementation, return the stream from the db package.
 				return nil, 0, fmt.Errorf("parquet streaming not implemented for worker_auth_token")
+
+				// Example of how it might look when implemented:
+				// return dbClient.StreamOldWorkerAuthTokensAsParquet(ctx, retention)
 			},
 			deleteFunc: dbClient.DeleteOldWorkerAuthTokens,
 		},
@@ -134,6 +119,8 @@ func runCleanupCycle(ctx context.Context, dbClient *db.DB, s3Client S3Uploader, 
 				// TODO: Implement db.StreamOldInstanceStatusesAsParquet(ctx, retention)
 				log.Printf("Placeholder: Streaming %s older than %v as Parquet", "instance_status", retention)
 				return nil, 0, fmt.Errorf("parquet streaming not implemented for instance_status")
+				// Example:
+				// return dbClient.StreamOldInstanceStatusesAsParquet(ctx, retention)
 			},
 			deleteFunc: dbClient.DeleteOldInstanceStatuses,
 		},
@@ -144,6 +131,8 @@ func runCleanupCycle(ctx context.Context, dbClient *db.DB, s3Client S3Uploader, 
 				// TODO: Implement db.StreamOldJobStatusesAsParquet(ctx, retention)
 				log.Printf("Placeholder: Streaming %s older than %v as Parquet", "job_status", retention)
 				return nil, 0, fmt.Errorf("parquet streaming not implemented for job_status")
+				// Example:
+				// return dbClient.StreamOldJobStatusesAsParquet(ctx, retention)
 			},
 			deleteFunc: dbClient.DeleteOldJobStatuses,
 		},
@@ -157,8 +146,14 @@ func runCleanupCycle(ctx context.Context, dbClient *db.DB, s3Client S3Uploader, 
 			return // Stop processing further tables
 		}
 		if err := cleanupTable(ctx, s3Client, s3Bucket, task.tableName, task.retentionPeriod, task.streamFunc, task.deleteFunc); err != nil {
+			// Log error but continue, unless it's a context cancellation error which should have been caught earlier
 			log.Printf("ERROR: Failed to cleanup table %s: %v", task.tableName, err)
-			// Continue to the next table even if one fails
+			// Check again if the error was due to cancellation during the task execution
+			if ctx.Err() != nil {
+				log.Printf("Cleanup cycle interrupted during task for %s: %v", task.tableName, ctx.Err())
+				return // Stop processing further tables if context cancelled
+			}
+			// Continue to the next table even if one fails for other reasons
 		}
 	}
 
@@ -166,6 +161,7 @@ func runCleanupCycle(ctx context.Context, dbClient *db.DB, s3Client S3Uploader, 
 }
 
 // cleanupTable handles the streaming, uploading, and deleting for a single table.
+// No changes needed in this function or below as it uses the S3Uploader interface.
 func cleanupTable(
 	ctx context.Context,
 	s3Client S3Uploader,
@@ -197,8 +193,12 @@ func cleanupTable(
 		return fmt.Errorf("failed to stream data for %s: %w", tableName, err)
 	}
 	// Ensure stream resources are released, especially if it holds DB connections etc.
-	if closer, ok := parquetStream.(io.Closer); ok {
-		defer closer.Close()
+	// Use a flag to track if the stream was successfully created and needs closing.
+	streamNeedsClosing := parquetStream != nil
+	if streamNeedsClosing {
+		if closer, ok := parquetStream.(io.Closer); ok {
+			defer closer.Close() // Ensure closure even on errors/panics later
+		}
 	}
 
 	if recordCount == 0 {
@@ -210,8 +210,10 @@ func cleanupTable(
 	// Check for context cancellation before uploading
 	if err := ctx.Err(); err != nil {
 		// Attempt to close the stream reader if possible, even on cancellation before upload
-		if closer, ok := parquetStream.(io.Closer); ok {
-			closer.Close() // Best effort close
+		if streamNeedsClosing {
+			if closer, ok := parquetStream.(io.Closer); ok {
+				closer.Close() // Best effort close
+			}
 		}
 		return fmt.Errorf("context cancelled before S3 upload for %s: %w", tableName, err)
 	}
@@ -223,13 +225,17 @@ func cleanupTable(
 	err = s3Client.UploadStream(ctx, s3Bucket, archiveFileName, parquetStream)
 	// Close the stream explicitly *after* the upload attempt (or cancellation check)
 	// This ensures resources are released even if upload fails or context is cancelled during upload.
-	if closer, ok := parquetStream.(io.Closer); ok {
-		// We already deferred closer.Close(), but closing here ensures it happens
-		// before the delete step, regardless of upload success/failure.
-		// Defer ensures it closes eventually if errors occur earlier.
-		// Calling Close() multiple times is often safe for io.Closers.
-		closer.Close()
+	if streamNeedsClosing {
+		if closer, ok := parquetStream.(io.Closer); ok {
+			// Calling Close() multiple times is often safe for io.Closers.
+			// The defer above handles the general case, this ensures it's closed *before* delete.
+			closeErr := closer.Close()
+			if closeErr != nil {
+				log.Printf("Warning: error closing parquet stream for %s after upload attempt: %v", tableName, closeErr)
+			}
+		}
 	}
+
 	if err != nil {
 		// Check if the error was due to context cancellation during upload
 		if ctx.Err() != nil {
