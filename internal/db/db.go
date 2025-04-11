@@ -84,10 +84,25 @@ type JobStatusParquet struct {
 	Input      *string   `parquet:"input,optional"`
 }
 
-// WorkerAuthToken represents a row in the worker_auth_token table.
-type WorkerAuthToken struct {
-	Token     string    `parquet:"token"`
-	CreatedAt time.Time `parquet:"created_at"`
+// WorkerAuthTokenStatus represents a row in the worker_auth_token_status table.
+// Each row represents a state transition for a token identified by TokenID.
+type WorkerAuthTokenStatus struct {
+	ID         int            // Primary key for the status record
+	TokenID    string         // Groups status events for the same logical token
+	Token      string         // The actual unique token value
+	InstanceID sql.NullInt64  // Associated Vast AI instance ID
+	Status     string         // Status: created, validated, expired, invalidated
+	CreatedAt  time.Time      // Timestamp of this status event
+}
+
+// WorkerAuthTokenStatusParquet is a helper struct for Parquet serialization.
+type WorkerAuthTokenStatusParquet struct {
+	ID         int       `parquet:"id"`
+	TokenID    string    `parquet:"token_id"`
+	Token      string    `parquet:"token"`
+	InstanceID *int64    `parquet:"instance_id,optional"`
+	Status     string    `parquet:"status"`
+	CreatedAt  time.Time `parquet:"created_at"`
 }
 
 // InsertInstanceStatus inserts a new instance status record into the database.
@@ -118,6 +133,8 @@ func (db *DB) GetInstanceStatus(ctx context.Context, vastAIID int) (*InstanceSta
 }
 
 // InsertJobStatus inserts a new job status record into the database.
+// Note: This function assumes each insert represents a new state, matching the table description.
+// It does not update existing rows based on job_id.
 func (db *DB) InsertJobStatus(ctx context.Context, jobID, status string, instanceID *int64, input *string) error {
 	query := `INSERT INTO job_status (job_id, status, created_at, instance_id, input) VALUES ($1, $2, NOW(), $3, $4)`
 
@@ -138,9 +155,16 @@ func (db *DB) InsertJobStatus(ctx context.Context, jobID, status string, instanc
 	return nil
 }
 
-// UpdateJobStatus updates the status of a job in the database.
-func (db *DB) UpdateJobStatus(ctx context.Context, jobID, status string, errorMsg, result *string) error {
-	query := `UPDATE job_status SET status = $1, error = $2, result = $3 WHERE job_id = $4` // Note: This doesn't update created_at
+// UpdateJobStatus adds a new record representing the updated status for a job.
+// This aligns with the table description where each record represents a state change.
+func (db *DB) UpdateJobStatus(ctx context.Context, jobID, status string, instanceID *int64, errorMsg, result *string) error {
+	query := `INSERT INTO job_status (job_id, status, created_at, instance_id, error, result)
+	          VALUES ($1, $2, NOW(), $3, $4, $5)`
+
+	var instanceIDValue sql.NullInt64
+	if instanceID != nil {
+		instanceIDValue = sql.NullInt64{Int64: *instanceID, Valid: true}
+	}
 
 	var errorValue sql.NullString
 	if errorMsg != nil {
@@ -152,26 +176,14 @@ func (db *DB) UpdateJobStatus(ctx context.Context, jobID, status string, errorMs
 		resultValue = sql.NullString{String: *result, Valid: true}
 	}
 
-	res, err := db.Conn.ExecContext(ctx, query, status, errorValue, resultValue, jobID)
+	_, err := db.Conn.ExecContext(ctx, query, jobID, status, instanceIDValue, errorValue, resultValue)
 	if err != nil {
-		return fmt.Errorf("failed to update job status for job_id %s: %w", jobID, err)
+		return fmt.Errorf("failed to insert updated job status for job_id %s: %w", jobID, err)
 	}
-
-	rowsAffected, err := res.RowsAffected()
-	if err != nil {
-		// Log this error but don't necessarily fail the operation
-		log.Printf("Warning: could not get rows affected after updating job status for %s: %v", jobID, err)
-	} else if rowsAffected == 0 {
-		log.Printf("Warning: updating job status for %s affected 0 rows (job might not exist or status was the same)", jobID)
-		// Depending on requirements, you might want to return an error here
-		// return fmt.Errorf("job with job_id %s not found for update", jobID)
-	}
-
 	return nil
 }
 
 // GetJobStatus retrieves the *latest* status record for a job from the database.
-// Assuming multiple records can exist per job_id, ordered by created_at.
 func (db *DB) GetJobStatus(ctx context.Context, jobID string) (*JobStatus, error) {
 	query := `
 		SELECT id, job_id, status, created_at, error, result, instance_id, input
@@ -202,48 +214,66 @@ func (db *DB) GetJobStatus(ctx context.Context, jobID string) (*JobStatus, error
 	return &jobStatus, nil
 }
 
-// InsertWorkerAuthToken inserts a new worker auth token into the database.
-func (db *DB) InsertWorkerAuthToken(ctx context.Context, token string) error {
-	query := `INSERT INTO worker_auth_token (token, created_at) VALUES ($1, NOW())`
-	_, err := db.Conn.ExecContext(ctx, query, token)
+// InsertWorkerAuthTokenStatus inserts a new worker auth token status record.
+func (db *DB) InsertWorkerAuthTokenStatus(ctx context.Context, tokenID, token string, instanceID *int64, status string) error {
+	query := `INSERT INTO worker_auth_token_status (token_id, token, instance_id, status, created_at) VALUES ($1, $2, $3, $4, NOW())`
+
+	var instanceIDValue sql.NullInt64
+	if instanceID != nil {
+		instanceIDValue = sql.NullInt64{Int64: *instanceID, Valid: true}
+	}
+
+	_, err := db.Conn.ExecContext(ctx, query, tokenID, token, instanceIDValue, status)
 	if err != nil {
-		// Consider logging the token itself might be a security risk, log hash if needed.
-		return fmt.Errorf("failed to insert worker auth token: %w", err)
+		// Avoid logging the actual token value for security. Log tokenID if needed.
+		return fmt.Errorf("failed to insert worker auth token status (token_id: %s): %w", tokenID, err)
 	}
 	return nil
 }
 
-// GetWorkerAuthToken retrieves a worker auth token from the database.
-func (db *DB) GetWorkerAuthToken(ctx context.Context, token string) (*WorkerAuthToken, error) {
-	query := `SELECT token, created_at FROM worker_auth_token WHERE token = $1`
+// GetLatestWorkerAuthTokenStatusByToken retrieves the *latest* status record for a specific token value.
+func (db *DB) GetLatestWorkerAuthTokenStatusByToken(ctx context.Context, token string) (*WorkerAuthTokenStatus, error) {
+	query := `
+		SELECT id, token_id, token, instance_id, status, created_at
+		FROM worker_auth_token_status
+		WHERE token = $1
+		ORDER BY created_at DESC
+		LIMIT 1`
 	row := db.Conn.QueryRowContext(ctx, query, token)
 
-	var workerAuthToken WorkerAuthToken
-	err := row.Scan(&workerAuthToken.Token, &workerAuthToken.CreatedAt)
+	var tokenStatus WorkerAuthTokenStatus
+	err := row.Scan(
+		&tokenStatus.ID,
+		&tokenStatus.TokenID,
+		&tokenStatus.Token,
+		&tokenStatus.InstanceID,
+		&tokenStatus.Status,
+		&tokenStatus.CreatedAt,
+	)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, nil // No token found
+			return nil, nil // No status found for this token value
 		}
 		// Don't log the token here for security.
-		return nil, fmt.Errorf("failed to get worker auth token: %w", err)
+		return nil, fmt.Errorf("failed to get latest worker auth token status: %w", err)
 	}
 
-	return &workerAuthToken, nil
+	return &tokenStatus, nil
 }
 
-// DeleteOldWorkerAuthTokens deletes worker auth tokens older than the specified retention period.
-func (db *DB) DeleteOldWorkerAuthTokens(ctx context.Context, retentionPeriod time.Duration) (int64, error) {
+// DeleteOldWorkerAuthTokenStatuses deletes worker auth token status records older than the specified retention period.
+func (db *DB) DeleteOldWorkerAuthTokenStatuses(ctx context.Context, retentionPeriod time.Duration) (int64, error) {
 	cutoffTime := time.Now().Add(-retentionPeriod)
-	query := `DELETE FROM worker_auth_token WHERE created_at < $1`
+	query := `DELETE FROM worker_auth_token_status WHERE created_at < $1`
 	result, err := db.Conn.ExecContext(ctx, query, cutoffTime)
 	if err != nil {
-		return 0, fmt.Errorf("failed to delete old worker auth tokens: %w", err)
+		return 0, fmt.Errorf("failed to delete old worker auth token statuses: %w", err)
 	}
 
 	rowsAffected, err := result.RowsAffected()
 	if err != nil {
 		// This error might occur on drivers that don't support RowsAffected.
-		return 0, fmt.Errorf("failed to get rows affected after deleting worker auth tokens: %w", err)
+		return 0, fmt.Errorf("failed to get rows affected after deleting worker auth token statuses: %w", err)
 	}
 	return rowsAffected, nil
 }
@@ -282,40 +312,47 @@ func (db *DB) DeleteOldJobStatuses(ctx context.Context, retentionPeriod time.Dur
 
 // --- Paged Getters for Archiving ---
 
-// GetOldWorkerAuthTokensPaged fetches a page of worker auth tokens older than the retention period.
-func (db *DB) GetOldWorkerAuthTokensPaged(ctx context.Context, retentionPeriod time.Duration, limit, offset int) ([]WorkerAuthToken, error) {
+// GetOldWorkerAuthTokenStatusesPaged fetches a page of worker auth token statuses older than the retention period.
+func (db *DB) GetOldWorkerAuthTokenStatusesPaged(ctx context.Context, retentionPeriod time.Duration, limit, offset int) ([]WorkerAuthTokenStatus, error) {
 	cutoffTime := time.Now().Add(-retentionPeriod)
 	query := `
-		SELECT token, created_at
-		FROM worker_auth_token
+		SELECT id, token_id, token, instance_id, status, created_at
+		FROM worker_auth_token_status
 		WHERE created_at < $1
-		ORDER BY created_at -- Consistent ordering is important for pagination
+		ORDER BY created_at 
 		LIMIT $2 OFFSET $3`
 
 	rows, err := db.Conn.QueryContext(ctx, query, cutoffTime, limit, offset)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query old worker auth tokens (paged): %w", err)
+		return nil, fmt.Errorf("failed to query old worker auth token statuses (paged): %w", err)
 	}
 	defer rows.Close()
 
-	var tokens []WorkerAuthToken
+	var statuses []WorkerAuthTokenStatus
 	for rows.Next() {
-		var token WorkerAuthToken
-		if err := rows.Scan(&token.Token, &token.CreatedAt); err != nil {
-			return nil, fmt.Errorf("failed to scan worker auth token row (paged): %w", err)
+		var status WorkerAuthTokenStatus
+		if err := rows.Scan(
+			&status.ID,
+			&status.TokenID,
+			&status.Token,
+			&status.InstanceID,
+			&status.Status,
+			&status.CreatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("failed to scan worker auth token status row (paged): %w", err)
 		}
-		tokens = append(tokens, token)
+		statuses = append(statuses, status)
 	}
 
 	if err = rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating worker auth token rows (paged): %w", err)
+		return nil, fmt.Errorf("error iterating worker auth token status rows (paged): %w", err)
 	}
 
-	return tokens, nil
+	return statuses, nil
 }
 
 // GetOldInstanceStatusesPaged fetches a page of instance statuses older than the retention period.
-func (db *DB) GetOldInstanceStatusesPaged(ctx context.Context, retentionPeriod time.Duration, limit, offset int) ([]InstanceStatus, error) {
+func (db *DB) GetOldInstanceStatusesPaged(ctx context.ंटext, retentionPeriod time.Duration, limit, offset int) ([]InstanceStatus, error) {
 	cutoffTime := time.Now().Add(-retentionPeriod)
 	query := `
 		SELECT id, vast_ai_id, status, created_at
@@ -386,3 +423,4 @@ func (db *DB) GetOldJobStatusesPaged(ctx context.Context, retentionPeriod time.D
 
 	return statuses, nil
 }
+
