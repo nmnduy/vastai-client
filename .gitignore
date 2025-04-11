@@ -1,0 +1,15 @@
+# Binaries
+*.exe
+*.o
+*.a
+
+# Dependencies
+/vendor
+
+# IDE
+.idea/
+
+# Go build cache
+/tmp
+_obj
+_test
