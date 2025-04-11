@@ -191,23 +191,54 @@ func (db *DB) GetWorkerAuthToken(ctx context.Context, token string) (*WorkerAuth
 	return &workerAuthToken, nil
 }
 
-// DeleteOldWorkerAuthTokens deletes worker auth tokens older than 1 month.
-func (db *DB) DeleteOldWorkerAuthTokens(ctx context.Context) error {
-	query := `DELETE FROM worker_auth_token WHERE created_at < NOW() - INTERVAL '1 month'`
-	_, err := db.Conn.ExecContext(ctx, query)
-	return err
+// DeleteOldWorkerAuthTokens deletes worker auth tokens older than the specified retention period.
+// It returns the number of deleted tokens and an error, if any.
+func (db *DB) DeleteOldWorkerAuthTokens(ctx context.Context, retentionPeriod time.Duration) (int64, error) {
+	cutoffTime := time.Now().Add(-retentionPeriod)
+	query := `DELETE FROM worker_auth_token WHERE created_at < $1`
+	result, err := db.Conn.ExecContext(ctx, query, cutoffTime)
+	if err != nil {
+		return 0, err
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		// This error might occur on drivers that don't support RowsAffected.
+		return 0, err
+	}
+	return rowsAffected, nil
 }
 
-// DeleteOldInstanceStatuses deletes instance statuses older than 1 year.
-func (db *DB) DeleteOldInstanceStatuses(ctx context.Context) error {
-	query := `DELETE FROM instance_status WHERE created_at < NOW() - INTERVAL '1 year'`
-	_, err := db.Conn.ExecContext(ctx, query)
-	return err
+// DeleteOldInstanceStatuses deletes instance statuses older than the specified retention period.
+// It returns the number of deleted statuses and an error, if any.
+func (db *DB) DeleteOldInstanceStatuses(ctx context.Context, retentionPeriod time.Duration) (int64, error) {
+	cutoffTime := time.Now().Add(-retentionPeriod)
+	query := `DELETE FROM instance_status WHERE created_at < $1`
+	result, err := db.Conn.ExecContext(ctx, query, cutoffTime)
+	if err != nil {
+		return 0, err
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return rowsAffected, nil
 }
 
-// DeleteOldJobStatuses deletes job statuses older than 3 months.
-func (db *DB) DeleteOldJobStatuses(ctx context.Context) error {
-	query := `DELETE FROM job_status WHERE created_at < NOW() - INTERVAL '3 months'`
-	_, err := db.Conn.ExecContext(ctx, query)
-	return err
+// DeleteOldJobStatuses deletes job statuses older than the specified retention period.
+// It returns the number of deleted statuses and an error, if any.
+func (db *DB) DeleteOldJobStatuses(ctx context.Context, retentionPeriod time.Duration) (int64, error) {
+	cutoffTime := time.Now().Add(-retentionPeriod)
+	query := `DELETE FROM job_status WHERE created_at < $1`
+	result, err := db.Conn.ExecContext(ctx, query, cutoffTime)
+	if err != nil {
+		return 0, err
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return rowsAffected, nil
 }
