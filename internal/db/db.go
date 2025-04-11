@@ -86,7 +86,7 @@ type JobStatusParquet struct {
 
 // WorkerAuthToken represents a row in the worker_auth_token table.
 type WorkerAuthToken struct {
-	Token     string    `parquet:"token"` // Add parquet tags
+	Token     string    `parquet:"token"`
 	CreatedAt time.Time `parquet:"created_at"`
 }
 
