@@ -10,10 +10,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/parquet-go/parquet-go" // Import the parquet library
+
 	"github.com/nmnduy/vastai-client/internal/db"
 	"github.com/nmnduy/vastai-client/internal/s3"
-	// TODO: Import a Parquet writer library (e.g., github.com/parquet-go/parquet-go)
-	// in the `db` package where streaming happens.
 )
 
 const (
@@ -67,7 +67,6 @@ func main() {
 		log.Fatalf("Failed to initialize S3 client: %v", err)
 	}
 	log.Println("S3 client initialized.")
-	// Removed placeholder S3 client instantiation
 
 	// --- Run Cleanup ---
 	log.Println("Running cleanup process...")
@@ -83,17 +82,14 @@ func main() {
 }
 
 // runCleanupCycle performs one full cleanup cycle for all tables.
-// No changes needed in this function or below as it uses the S3Uploader interface.
 func runCleanupCycle(ctx context.Context, dbClient *db.DB, s3Client S3Uploader, s3Bucket string) {
-	// ... rest of the function remains the same ...
 	log.Println("Starting cleanup cycle...")
 
 	// Define cleanup tasks for each table
 	tasks := []struct {
 		tableName       string
 		retentionPeriod time.Duration
-		// streamFunc should now stream data in Parquet format.
-		// The database layer (`db` package) is responsible for generating the Parquet stream.
+		// streamFunc now fetches raw data and generates Parquet stream in-memory via io.Pipe.
 		streamFunc func(context.Context, time.Duration) (io.Reader, int64, error) // Returns reader, count, error
 		deleteFunc func(context.Context, time.Duration) (int64, error)            // Accepts retention, returns deleted count, error
 	}{
@@ -101,14 +97,45 @@ func runCleanupCycle(ctx context.Context, dbClient *db.DB, s3Client S3Uploader, 
 			tableName:       "worker_auth_token",
 			retentionPeriod: workerAuthTokenRetention,
 			streamFunc: func(ctx context.Context, retention time.Duration) (io.Reader, int64, error) {
-				// TODO: Implement db.StreamOldWorkerAuthTokensAsParquet(ctx, retention)
-				log.Printf("Placeholder: Streaming %s older than %v as Parquet", "worker_auth_token", retention)
-				// Simulate no data for now to avoid blocking on unimplemented feature
-				// In real implementation, return the stream from the db package.
-				return nil, 0, fmt.Errorf("parquet streaming not implemented for worker_auth_token")
+				records, count, err := dbClient.GetOldWorkerAuthTokens(ctx, retention)
+				if err != nil || count == 0 {
+					return nil, count, err // Return DB error or nil if no records
+				}
 
-				// Example of how it might look when implemented:
-				// return dbClient.StreamOldWorkerAuthTokensAsParquet(ctx, retention)
+				// Create a pipe: writer writes to it, reader reads from it.
+				pr, pw := io.Pipe()
+
+				// Start a goroutine to write Parquet data to the pipe writer.
+				go func() {
+					// Ensure the pipe writer is closed when the goroutine finishes.
+					// If an error occurs, close with the error; otherwise, close normally.
+					var writeErr error
+					defer func() {
+						pw.CloseWithError(writeErr)
+					}()
+
+					// Create a Parquet writer targeting the pipe writer.
+					// parquet.SchemaOf automatically derives the schema from the struct.
+					writer := parquet.NewWriter(pw, parquet.SchemaOf(new(db.WorkerAuthToken)))
+
+					// Write all fetched records to the Parquet writer.
+					writeErr = writer.Write(records)
+					if writeErr != nil {
+						log.Printf("ERROR writing parquet for %s: %v", "worker_auth_token", writeErr)
+						return // Error will be propagated via pw.CloseWithError(writeErr)
+					}
+
+					// Close the Parquet writer to finalize the file structure.
+					writeErr = writer.Close()
+					if writeErr != nil {
+						log.Printf("ERROR closing parquet writer for %s: %v", "worker_auth_token", writeErr)
+						// Error will be propagated via pw.CloseWithError(writeErr)
+					}
+				}()
+
+				// Return the pipe reader, record count, and no error (yet).
+				// Errors from the goroutine will be surfaced when the reader is used (e.g., by S3 upload).
+				return pr, count, nil
 			},
 			deleteFunc: dbClient.DeleteOldWorkerAuthTokens,
 		},
@@ -116,11 +143,29 @@ func runCleanupCycle(ctx context.Context, dbClient *db.DB, s3Client S3Uploader, 
 			tableName:       "instance_status",
 			retentionPeriod: instanceStatusRetention,
 			streamFunc: func(ctx context.Context, retention time.Duration) (io.Reader, int64, error) {
-				// TODO: Implement db.StreamOldInstanceStatusesAsParquet(ctx, retention)
-				log.Printf("Placeholder: Streaming %s older than %v as Parquet", "instance_status", retention)
-				return nil, 0, fmt.Errorf("parquet streaming not implemented for instance_status")
-				// Example:
-				// return dbClient.StreamOldInstanceStatusesAsParquet(ctx, retention)
+				records, count, err := dbClient.GetOldInstanceStatuses(ctx, retention)
+				if err != nil || count == 0 {
+					return nil, count, err
+				}
+
+				pr, pw := io.Pipe()
+				go func() {
+					var writeErr error
+					defer func() {
+						pw.CloseWithError(writeErr)
+					}()
+					writer := parquet.NewWriter(pw, parquet.SchemaOf(new(db.InstanceStatus)))
+					writeErr = writer.Write(records)
+					if writeErr != nil {
+						log.Printf("ERROR writing parquet for %s: %v", "instance_status", writeErr)
+						return
+					}
+					writeErr = writer.Close()
+					if writeErr != nil {
+						log.Printf("ERROR closing parquet writer for %s: %v", "instance_status", writeErr)
+					}
+				}()
+				return pr, count, nil
 			},
 			deleteFunc: dbClient.DeleteOldInstanceStatuses,
 		},
@@ -128,11 +173,65 @@ func runCleanupCycle(ctx context.Context, dbClient *db.DB, s3Client S3Uploader, 
 			tableName:       "job_status",
 			retentionPeriod: jobStatusRetention,
 			streamFunc: func(ctx context.Context, retention time.Duration) (io.Reader, int64, error) {
-				// TODO: Implement db.StreamOldJobStatusesAsParquet(ctx, retention)
-				log.Printf("Placeholder: Streaming %s older than %v as Parquet", "job_status", retention)
-				return nil, 0, fmt.Errorf("parquet streaming not implemented for job_status")
-				// Example:
-				// return dbClient.StreamOldJobStatusesAsParquet(ctx, retention)
+				records, count, err := dbClient.GetOldJobStatuses(ctx, retention)
+				if err != nil || count == 0 {
+					return nil, count, err
+				}
+
+				pr, pw := io.Pipe()
+				go func() {
+					var writeErr error
+					defer func() {
+						pw.CloseWithError(writeErr)
+					}()
+					// Need a helper struct for Parquet as parquet-go doesn't directly handle sql.Null* types well.
+					type JobStatusParquet struct {
+						ID         int       `parquet:"id"`
+						JobID      string    `parquet:"job_id"`
+						Status     string    `parquet:"status"`
+						CreatedAt  time.Time `parquet:"created_at"`
+						Error      *string   `parquet:"error,optional"`
+						Result     *string   `parquet:"result,optional"`
+						InstanceID *int64    `parquet:"instance_id,optional"`
+						Input      *string   `parquet:"input,optional"`
+					}
+
+					// Map db.JobStatus to JobStatusParquet before writing
+					parquetRecords := make([]JobStatusParquet, len(records))
+					for i, r := range records {
+						parquetRecords[i] = JobStatusParquet{
+							ID:        r.ID,
+							JobID:     r.JobID,
+							Status:    r.Status,
+							CreatedAt: r.CreatedAt,
+						}
+						// Handle nullable fields
+						if r.Error.Valid {
+							parquetRecords[i].Error = &r.Error.String
+						}
+						if r.Result.Valid {
+							parquetRecords[i].Result = &r.Result.String
+						}
+						if r.InstanceID.Valid {
+							parquetRecords[i].InstanceID = &r.InstanceID.Int64
+						}
+						if r.Input.Valid {
+							parquetRecords[i].Input = &r.Input.String
+						}
+					}
+
+					writer := parquet.NewWriter(pw, parquet.SchemaOf(new(JobStatusParquet)))
+					writeErr = writer.Write(parquetRecords)
+					if writeErr != nil {
+						log.Printf("ERROR writing parquet for %s: %v", "job_status", writeErr)
+						return
+					}
+					writeErr = writer.Close()
+					if writeErr != nil {
+						log.Printf("ERROR closing parquet writer for %s: %v", "job_status", writeErr)
+					}
+				}()
+				return pr, count, nil
 			},
 			deleteFunc: dbClient.DeleteOldJobStatuses,
 		},
@@ -178,31 +277,35 @@ func cleanupTable(
 		return fmt.Errorf("context cancelled before processing table %s: %w", tableName, err)
 	}
 
-	// 1. Stream old records to a Parquet reader
-	parquetStream, recordCount, err := streamFunc(ctx, retentionPeriod)
+	// 1. Get the Parquet reader by executing the streamFunc
+	// The streamFunc now fetches data and sets up the Parquet encoding goroutine via io.Pipe
+	parquetStreamReader, recordCount, err := streamFunc(ctx, retentionPeriod)
 	if err != nil {
-		// Specific handling for "not implemented" errors vs. real errors
-		if err.Error() == fmt.Sprintf("parquet streaming not implemented for %s", tableName) {
-			log.Printf("Skipping %s: Parquet streaming function not implemented.", tableName)
-			return nil // Don't treat as a fatal error for the cycle
-		}
-		// Check if the error was due to context cancellation during streaming
+		// Check if the error was due to context cancellation during DB fetch
 		if ctx.Err() != nil {
-			return fmt.Errorf("context cancelled during streaming for %s: %w", tableName, ctx.Err())
+			return fmt.Errorf("context cancelled during data fetch for %s: %w", tableName, ctx.Err())
 		}
-		return fmt.Errorf("failed to stream data for %s: %w", tableName, err)
+		// Handle DB errors or other setup errors from streamFunc
+		return fmt.Errorf("failed to initiate streaming for %s: %w", tableName, err)
 	}
-	// Ensure stream resources are released, especially if it holds DB connections etc.
-	// Use a flag to track if the stream was successfully created and needs closing.
-	streamNeedsClosing := parquetStream != nil
+
+	// Ensure pipe reader resources are eventually closed
+	streamNeedsClosing := parquetStreamReader != nil
 	if streamNeedsClosing {
-		if closer, ok := parquetStream.(io.Closer); ok {
-			defer closer.Close() // Ensure closure even on errors/panics later
+		// The reader is an *io.PipeReader, ensure it's closed to unblock the writer goroutine in case of errors below.
+		if closer, ok := parquetStreamReader.(io.Closer); ok {
+			defer closer.Close()
 		}
 	}
 
 	if recordCount == 0 {
 		log.Printf("No old records found for %s matching retention period.", tableName)
+		// Close the reader explicitly if it was created, even if count is 0 (shouldn't happen often)
+		if streamNeedsClosing {
+			if closer, ok := parquetStreamReader.(io.Closer); ok {
+				closer.Close()
+			}
+		}
 		return nil // Nothing to archive or delete
 	}
 	log.Printf("Found %d records to archive for %s.", recordCount, tableName)
@@ -210,8 +313,9 @@ func cleanupTable(
 	// Check for context cancellation before uploading
 	if err := ctx.Err(); err != nil {
 		// Attempt to close the stream reader if possible, even on cancellation before upload
+		// This helps signal the writer goroutine to stop.
 		if streamNeedsClosing {
-			if closer, ok := parquetStream.(io.Closer); ok {
+			if closer, ok := parquetStreamReader.(io.Closer); ok {
 				closer.Close() // Best effort close
 			}
 		}
@@ -222,16 +326,18 @@ func cleanupTable(
 	archiveFileName := generateArchiveFileName(tableName) // Generates a .parquet filename
 	log.Printf("Uploading %s archive to s3://%s/%s", tableName, s3Bucket, archiveFileName)
 
-	err = s3Client.UploadStream(ctx, s3Bucket, archiveFileName, parquetStream)
-	// Close the stream explicitly *after* the upload attempt (or cancellation check)
-	// This ensures resources are released even if upload fails or context is cancelled during upload.
+	// UploadStream will read from parquetStreamReader, which pulls data from the goroutine writing parquet data.
+	err = s3Client.UploadStream(ctx, s3Bucket, archiveFileName, parquetStreamReader)
+
+	// Close the pipe reader *after* the upload attempt. This is crucial.
+	// Closing the reader signals EOF to the S3 client (if upload was successful)
+	// or signals an error to the writer goroutine if the upload failed mid-stream.
 	if streamNeedsClosing {
-		if closer, ok := parquetStream.(io.Closer); ok {
-			// Calling Close() multiple times is often safe for io.Closers.
-			// The defer above handles the general case, this ensures it's closed *before* delete.
+		if closer, ok := parquetStreamReader.(io.Closer); ok {
 			closeErr := closer.Close()
 			if closeErr != nil {
-				log.Printf("Warning: error closing parquet stream for %s after upload attempt: %v", tableName, closeErr)
+				// Logging this might be noisy if the writer goroutine already closed with error.
+				// log.Printf("Warning: error closing parquet stream reader for %s after upload attempt: %v", tableName, closeErr)
 			}
 		}
 	}
@@ -241,6 +347,11 @@ func cleanupTable(
 		if ctx.Err() != nil {
 			return fmt.Errorf("context cancelled during S3 upload for %s: %w", tableName, ctx.Err())
 		}
+		// Check if the error came from the Parquet writing goroutine via the pipe
+		if pipeErr, ok := err.(*io.PipeError); ok {
+			return fmt.Errorf("failed during parquet generation/streaming for %s: %w", tableName, pipeErr.Err)
+		}
+		// Otherwise, it's likely an S3 upload error
 		return fmt.Errorf("failed to upload archive %s to S3: %w", archiveFileName, err)
 	}
 	log.Printf("Successfully uploaded archive %s to S3.", archiveFileName)
@@ -262,22 +373,14 @@ func cleanupTable(
 		}
 
 		// Critical: Log failure but don't return error immediately if upload succeeded
-		// We might want manual intervention or retry logic here in a real scenario.
-		// For now, just log it prominently.
 		log.Printf("CRITICAL ERROR: Failed to delete archived records from %s after successful S3 upload: %v", tableName, err)
 		log.Printf("Manual cleanup for %s might be required.", tableName)
-		// Depending on requirements, you might return the error or not.
-		// Not returning error allows the overall job to report success if upload worked,
-		// but risks leaving old data. Returning error makes the failure explicit.
-		// Let's return the error to make the cron job fail clearly.
-		return fmt.Errorf("failed to delete records from %s: %w", tableName, err)
+		return fmt.Errorf("failed to delete records from %s: %w", tableName, err) // Return error to make the job fail clearly.
 	}
 
 	// Optional: Verify deleted count matches archived count
 	if deletedCount != recordCount {
 		log.Printf("WARNING: Archived %d records for %s but deleted %d records.", recordCount, tableName, deletedCount)
-		// Decide if this is an error condition based on application logic.
-		// It might indicate a race condition or issue with the delete logic.
 	} else {
 		log.Printf("Successfully deleted %d archived records from %s.", deletedCount, tableName)
 	}

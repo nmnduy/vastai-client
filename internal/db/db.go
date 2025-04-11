@@ -242,3 +242,90 @@ func (db *DB) DeleteOldJobStatuses(ctx context.Context, retentionPeriod time.Dur
 	}
 	return rowsAffected, nil
 }
+
+// GetOldWorkerAuthTokens fetches worker auth tokens older than the retention period.
+func (db *DB) GetOldWorkerAuthTokens(ctx context.Context, retentionPeriod time.Duration) ([]WorkerAuthToken, int64, error) {
+	cutoffTime := time.Now().Add(-retentionPeriod)
+	query := `SELECT token, created_at FROM worker_auth_token WHERE created_at < $1 ORDER BY created_at` // Order predictable for potential debugging
+	rows, err := db.Conn.QueryContext(ctx, query, cutoffTime)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to query old worker auth tokens: %w", err)
+	}
+	defer rows.Close()
+
+	var tokens []WorkerAuthToken
+	for rows.Next() {
+		var token WorkerAuthToken
+		if err := rows.Scan(&token.Token, &token.CreatedAt); err != nil {
+			return nil, 0, fmt.Errorf("failed to scan worker auth token row: %w", err)
+		}
+		tokens = append(tokens, token)
+	}
+
+	if err = rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("error iterating worker auth token rows: %w", err)
+	}
+
+	return tokens, int64(len(tokens)), nil
+}
+
+// GetOldInstanceStatuses fetches instance statuses older than the retention period.
+func (db *DB) GetOldInstanceStatuses(ctx context.Context, retentionPeriod time.Duration) ([]InstanceStatus, int64, error) {
+	cutoffTime := time.Now().Add(-retentionPeriod)
+	query := `SELECT id, vast_ai_id, status, created_at FROM instance_status WHERE created_at < $1 ORDER BY created_at`
+	rows, err := db.Conn.QueryContext(ctx, query, cutoffTime)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to query old instance statuses: %w", err)
+	}
+	defer rows.Close()
+
+	var statuses []InstanceStatus
+	for rows.Next() {
+		var status InstanceStatus
+		if err := rows.Scan(&status.ID, &status.VastAIID, &status.Status, &status.CreatedAt); err != nil {
+			return nil, 0, fmt.Errorf("failed to scan instance status row: %w", err)
+		}
+		statuses = append(statuses, status)
+	}
+
+	if err = rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("error iterating instance status rows: %w", err)
+	}
+
+	return statuses, int64(len(statuses)), nil
+}
+
+// GetOldJobStatuses fetches job statuses older than the retention period.
+func (db *DB) GetOldJobStatuses(ctx context.Context, retentionPeriod time.Duration) ([]JobStatus, int64, error) {
+	cutoffTime := time.Now().Add(-retentionPeriod)
+	query := `SELECT id, job_id, status, created_at, error, result, instance_id, input FROM job_status WHERE created_at < $1 ORDER BY created_at`
+	rows, err := db.Conn.QueryContext(ctx, query, cutoffTime)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to query old job statuses: %w", err)
+	}
+	defer rows.Close()
+
+	var statuses []JobStatus
+	for rows.Next() {
+		var status JobStatus
+		if err := rows.Scan(
+			&status.ID,
+			&status.JobID,
+			&status.Status,
+			&status.CreatedAt,
+			&status.Error,
+			&status.Result,
+			&status.InstanceID,
+			&status.Input,
+		); err != nil {
+			return nil, 0, fmt.Errorf("failed to scan job status row: %w", err)
+		}
+		statuses = append(statuses, status)
+	}
+
+	if err = rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("error iterating job status rows: %w", err)
+	}
+
+	return statuses, int64(len(statuses)), nil
+}
