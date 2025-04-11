@@ -1,0 +1,50 @@
+syntax = "proto3";
+
+package vast;
+
+option go_package = "internal/grpc";
+
+// The request message containing the worker token.
+message AuthenticateWorkerRequest {
+  string token = 1;
+}
+
+// The response message containing the job details.
+message AuthenticateWorkerResponse {
+  bool authenticated = 1;
+}
+
+// The request message containing the job ID.
+message GetJobRequest {
+  int64 job_id = 1;
+}
+
+// The response message containing the job details.
+message GetJobResponse {
+  int64 job_id = 1;
+  string input = 2;
+}
+
+// The request message containing the job result.
+message SubmitJobResultRequest {
+  int64 job_id = 1;
+  string result = 2;
+  string error = 3;
+}
+
+// The response message indicating success or failure.
+message SubmitJobResultResponse {
+  bool success = 1;
+}
+
+// The greeting service definition.
+service WorkerService {
+  // Authenticates a worker.
+  rpc AuthenticateWorker (AuthenticateWorkerRequest) returns (AuthenticateWorkerResponse) {}
+
+  // Gets a job for the worker.
+  rpc GetJob (GetJobRequest) returns (GetJobResponse) {}
+
+  // Submit job result.
+  rpc SubmitJobResult (SubmitJobResultRequest) returns (SubmitJobResultResponse) {}
+}
