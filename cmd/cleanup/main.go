@@ -95,7 +95,7 @@ func runCleanupCycle(ctx context.Context, dbClient *db.DB, s3Client S3Uploader, 
 		// streamFunc should now stream data in Parquet format.
 		// The database layer (`db` package) is responsible for generating the Parquet stream.
 		streamFunc func(context.Context, time.Duration) (io.Reader, int64, error) // Returns reader, count, error
-		deleteFunc func(context.Context, time.Duration) error                     // Accepts retention, returns error
+		deleteFunc func(context.Context, time.Duration) (int64, error)            // Accepts retention, returns deleted count, error
 	}{
 		{
 			tableName:       "worker_auth_token",
@@ -169,7 +169,7 @@ func cleanupTable(
 	tableName string,
 	retentionPeriod time.Duration,
 	streamFunc func(context.Context, time.Duration) (io.Reader, int64, error),
-	deleteFunc func(context.Context, time.Duration) error,
+	deleteFunc func(context.Context, time.Duration) (int64, error),
 ) error {
 	log.Printf("Processing cleanup for table: %s (retention: %v)", tableName, retentionPeriod)
 
