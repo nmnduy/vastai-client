@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"errors" // Import errors package
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -19,9 +19,9 @@ import (
 
 const (
 	// Retention periods
-	workerAuthTokenRetention = 30 * 24 * time.Hour  // 1 month
-	instanceStatusRetention  = 365 * 24 * time.Hour // 1 year
-	jobStatusRetention       = 90 * 24 * time.Hour  // 3 months
+	workerAuthTokenStatusRetention = 30 * 24 * time.Hour  // 1 month for worker_auth_token_status
+	instanceStatusRetention        = 365 * 24 * time.Hour // 1 year
+	jobStatusRetention             = 90 * 24 * time.Hour  // 3 months
 
 	// Database query page size for streaming
 	dbPageSize = 20000
@@ -100,82 +100,13 @@ func runCleanupCycle(ctx context.Context, dbClient *db.DB, s3Client S3Uploader, 
 		deleteFunc func(context.Context, time.Duration) (int64, error)
 	}{
 		{
-			tableName:       "worker_auth_token",
-			retentionPeriod: workerAuthTokenRetention,
+			tableName:       "worker_auth_token_status",
+			retentionPeriod: workerAuthTokenStatusRetention,
 			streamFunc: func(ctx context.Context, retention time.Duration) (io.Reader, <-chan int64, <-chan error, error) {
 				pr, pw := io.Pipe()
 				countCh := make(chan int64, 1)
 				errCh := make(chan error, 1)
-
-				go func() {
-					var writeErr error
-					var totalCount int64
-					defer func() {
-						// Ensure channels are written to and pipe is closed on exit.
-						// Only send count if successful.
-						if writeErr == nil {
-							countCh <- totalCount
-						}
-						errCh <- writeErr           // Send nil on success, error otherwise
-						pw.CloseWithError(writeErr) // Close pipe with error or nil
-					}()
-
-					// Create Parquet writer targeting the pipe. Use struct tags for schema.
-					writer := parquet.NewWriter(pw, parquet.SchemaOf(new(db.WorkerAuthToken)))
-
-					offset := 0
-					for {
-						// Check for cancellation before each DB query
-						if err := ctx.Err(); err != nil {
-							writeErr = fmt.Errorf("context cancelled during %s paging: %w", "worker_auth_token", err)
-							return
-						}
-
-						// Fetch a page of records
-						records, fetchErr := dbClient.GetOldWorkerAuthTokensPaged(ctx, retention, dbPageSize, offset)
-						if fetchErr != nil {
-							writeErr = fmt.Errorf("failed to fetch %s page (offset %d): %w", "worker_auth_token", offset, fetchErr)
-							return
-						}
-
-						// Stop if no more records
-						if len(records) == 0 {
-							break
-						}
-
-						// Write the fetched batch to the Parquet writer
-						if wErr := writer.Write(records); wErr != nil {
-							writeErr = fmt.Errorf("failed to write %s parquet batch (offset %d): %w", "worker_auth_token", offset, wErr)
-							return
-						}
-
-						totalCount += int64(len(records))
-						offset += len(records) // Correctly increment offset by records processed
-
-						// Optional: Log progress periodically
-						// if offset % (dbPageSize * 10) == 0 { // Log every 10 pages
-						//     log.Printf("Archiving %s: processed %d records...", "worker_auth_token", totalCount)
-						// }
-					}
-
-					// Close the Parquet writer to finalize the file structure
-					writeErr = writer.Close()
-					if writeErr != nil {
-						log.Printf("ERROR closing parquet writer for %s: %v", "worker_auth_token", writeErr)
-					}
-				}()
-
-				return pr, countCh, errCh, nil // Initial setup error is nil
-			},
-			deleteFunc: dbClient.DeleteOldWorkerAuthTokens,
-		},
-		{
-			tableName:       "instance_status",
-			retentionPeriod: instanceStatusRetention,
-			streamFunc: func(ctx context.Context, retention time.Duration) (io.Reader, <-chan int64, <-chan error, error) {
-				pr, pw := io.Pipe()
-				countCh := make(chan int64, 1)
-				errCh := make(chan error, 1)
+				tableName := "worker_auth_token_status"
 
 				go func() {
 					var writeErr error
@@ -188,24 +119,106 @@ func runCleanupCycle(ctx context.Context, dbClient *db.DB, s3Client S3Uploader, 
 						pw.CloseWithError(writeErr)
 					}()
 
-					writer := parquet.NewWriter(pw, parquet.SchemaOf(new(db.InstanceStatus))) // Uses struct tags
+					// Use the dedicated Parquet struct
+					writer := parquet.NewWriter(pw, parquet.SchemaOf(new(db.WorkerAuthTokenStatusParquet)))
 
 					offset := 0
 					for {
 						if err := ctx.Err(); err != nil {
-							writeErr = fmt.Errorf("context cancelled during %s paging: %w", "instance_status", err)
+							writeErr = fmt.Errorf("context cancelled during %s paging: %w", tableName, err)
+							return
+						}
+
+						// Fetch a page of records - Updated function call
+						records, fetchErr := dbClient.GetOldWorkerAuthTokenStatusesPaged(ctx, retention, dbPageSize, offset)
+						if fetchErr != nil {
+							writeErr = fmt.Errorf("failed to fetch %s page (offset %d): %w", tableName, offset, fetchErr)
+							return
+						}
+
+						if len(records) == 0 {
+							break
+						}
+
+						// Map db.WorkerAuthTokenStatus to db.WorkerAuthTokenStatusParquet before writing
+						parquetRecords := make([]db.WorkerAuthTokenStatusParquet, len(records))
+						for i, r := range records {
+							parquetRecords[i] = db.WorkerAuthTokenStatusParquet{
+								ID:        r.ID,
+								TokenID:   r.TokenID,
+								Token:     r.Token,
+								Status:    r.Status,
+								CreatedAt: r.CreatedAt,
+							}
+							if r.InstanceID.Valid {
+								parquetRecords[i].InstanceID = &r.InstanceID.Int64
+							}
+						}
+
+						// Write the mapped batch to the Parquet writer
+						if wErr := writer.Write(parquetRecords); wErr != nil {
+							writeErr = fmt.Errorf("failed to write %s parquet batch (offset %d): %w", tableName, offset, wErr)
+							return
+						}
+
+						totalCount += int64(len(records))
+						offset += len(records) // Correctly increment offset
+
+						// Optional: Log progress
+						// if offset%(dbPageSize*10) == 0 {
+						// 	log.Printf("Archiving %s: processed %d records...", tableName, totalCount)
+						// }
+					}
+
+					writeErr = writer.Close()
+					if writeErr != nil {
+						log.Printf("ERROR closing parquet writer for %s: %v", tableName, writeErr)
+					}
+				}()
+
+				return pr, countCh, errCh, nil // Initial setup error is nil
+			},
+			deleteFunc: dbClient.DeleteOldWorkerAuthTokenStatuses,
+		},
+		{
+			tableName:       "instance_status",
+			retentionPeriod: instanceStatusRetention,
+			streamFunc: func(ctx context.Context, retention time.Duration) (io.Reader, <-chan int64, <-chan error, error) {
+				pr, pw := io.Pipe()
+				countCh := make(chan int64, 1)
+				errCh := make(chan error, 1)
+				tableName := "instance_status" // Local var for logging
+
+				go func() {
+					var writeErr error
+					var totalCount int64
+					defer func() {
+						if writeErr == nil {
+							countCh <- totalCount
+						}
+						errCh <- writeErr
+						pw.CloseWithError(writeErr)
+					}()
+
+					// Use struct with Parquet tags directly
+					writer := parquet.NewWriter(pw, parquet.SchemaOf(new(db.InstanceStatus)))
+
+					offset := 0
+					for {
+						if err := ctx.Err(); err != nil {
+							writeErr = fmt.Errorf("context cancelled during %s paging: %w", tableName, err)
 							return
 						}
 						records, fetchErr := dbClient.GetOldInstanceStatusesPaged(ctx, retention, dbPageSize, offset)
 						if fetchErr != nil {
-							writeErr = fmt.Errorf("failed to fetch %s page (offset %d): %w", "instance_status", offset, fetchErr)
+							writeErr = fmt.Errorf("failed to fetch %s page (offset %d): %w", tableName, offset, fetchErr)
 							return
 						}
 						if len(records) == 0 {
 							break
 						}
 						if wErr := writer.Write(records); wErr != nil {
-							writeErr = fmt.Errorf("failed to write %s parquet batch (offset %d): %w", "instance_status", offset, wErr)
+							writeErr = fmt.Errorf("failed to write %s parquet batch (offset %d): %w", tableName, offset, wErr)
 							return
 						}
 						totalCount += int64(len(records))
@@ -214,7 +227,7 @@ func runCleanupCycle(ctx context.Context, dbClient *db.DB, s3Client S3Uploader, 
 
 					writeErr = writer.Close()
 					if writeErr != nil {
-						log.Printf("ERROR closing parquet writer for %s: %v", "instance_status", writeErr)
+						log.Printf("ERROR closing parquet writer for %s: %v", tableName, writeErr)
 					}
 				}()
 				return pr, countCh, errCh, nil
@@ -228,6 +241,7 @@ func runCleanupCycle(ctx context.Context, dbClient *db.DB, s3Client S3Uploader, 
 				pr, pw := io.Pipe()
 				countCh := make(chan int64, 1)
 				errCh := make(chan error, 1)
+				tableName := "job_status" // Local var for logging
 
 				go func() {
 					var writeErr error
@@ -246,12 +260,12 @@ func runCleanupCycle(ctx context.Context, dbClient *db.DB, s3Client S3Uploader, 
 					offset := 0
 					for {
 						if err := ctx.Err(); err != nil {
-							writeErr = fmt.Errorf("context cancelled during %s paging: %w", "job_status", err)
+							writeErr = fmt.Errorf("context cancelled during %s paging: %w", tableName, err)
 							return
 						}
 						records, fetchErr := dbClient.GetOldJobStatusesPaged(ctx, retention, dbPageSize, offset)
 						if fetchErr != nil {
-							writeErr = fmt.Errorf("failed to fetch %s page (offset %d): %w", "job_status", offset, fetchErr)
+							writeErr = fmt.Errorf("failed to fetch %s page (offset %d): %w", tableName, offset, fetchErr)
 							return
 						}
 						if len(records) == 0 {
@@ -282,7 +296,7 @@ func runCleanupCycle(ctx context.Context, dbClient *db.DB, s3Client S3Uploader, 
 						}
 
 						if wErr := writer.Write(parquetRecords); wErr != nil {
-							writeErr = fmt.Errorf("failed to write %s parquet batch (offset %d): %w", "job_status", offset, wErr)
+							writeErr = fmt.Errorf("failed to write %s parquet batch (offset %d): %w", tableName, offset, wErr)
 							return
 						}
 						totalCount += int64(len(records))
@@ -291,7 +305,7 @@ func runCleanupCycle(ctx context.Context, dbClient *db.DB, s3Client S3Uploader, 
 
 					writeErr = writer.Close()
 					if writeErr != nil {
-						log.Printf("ERROR closing parquet writer for %s: %v", "job_status", writeErr)
+						log.Printf("ERROR closing parquet writer for %s: %v", tableName, writeErr)
 					}
 				}()
 				return pr, countCh, errCh, nil
