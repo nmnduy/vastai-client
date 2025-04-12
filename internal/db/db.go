@@ -155,17 +155,16 @@ func (db *DB) InsertJobStatus(ctx context.Context, jobID, status string, instanc
 	return nil
 }
 
-// UpdateJobStatus adds a new record representing the updated status for a job.
-// This aligns with the table description where each record represents a state change.
-func (db *DB) UpdateJobStatus(ctx context.Context, jobID, status string, instanceID *int64, errorMsg, result *string) error {
+// UpdateJobStatus adds a new record representing the updated status for a job,
+// without specifying the instance ID.
+// This aligns with the table description where each record represents a state change
+// and the instance ID might not be known initially (e.g., for 'created' or 'queued' status).
+func (db *DB) UpdateJobStatus(ctx context.Context, jobID, status string, errorMsg, result *string) error {
+	// Set instance_id to NULL as it's not provided in this function.
 	query := `INSERT INTO job_status (job_id, status, created_at, instance_id, error, result)
-	          VALUES ($1, $2, NOW(), $3, $4, $5)`
+	          VALUES ($1, $2, NOW(), NULL, $3, $4)`
 
-	var instanceIDValue sql.NullInt64
-	if instanceID != nil {
-		instanceIDValue = sql.NullInt64{Int64: *instanceID, Valid: true}
-	}
-
+	// Keep handling for nullable error and result strings
 	var errorValue sql.NullString
 	if errorMsg != nil {
 		errorValue = sql.NullString{String: *errorMsg, Valid: true}
@@ -176,7 +175,8 @@ func (db *DB) UpdateJobStatus(ctx context.Context, jobID, status string, instanc
 		resultValue = sql.NullString{String: *result, Valid: true}
 	}
 
-	_, err := db.Conn.ExecContext(ctx, query, jobID, status, instanceIDValue, errorValue, resultValue)
+	// Execute the query without instanceID
+	_, err := db.Conn.ExecContext(ctx, query, jobID, status, errorValue, resultValue)
 	if err != nil {
 		return fmt.Errorf("failed to insert updated job status for job_id %s: %w", jobID, err)
 	}

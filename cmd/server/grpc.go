@@ -69,7 +69,13 @@ func (s *WorkerServiceServer) SubmitJobResult(ctx context.Context, req *pb.Submi
 	errorMsg := req.GetError()
 	jobIDStr := fmt.Sprintf("%d", jobID)
 
-	err := s.db.UpdateJobStatus(ctx, jobIDStr, "completed", &errorMsg, &result)
+	err := s.db.UpdateJobStatus(
+		ctx,
+		jobIDStr,
+		"completed",
+		&errorMsg,
+		&result,
+	)
 	if err != nil {
 		log.Printf("Error updating job status: %v", err)
 		return &pb.SubmitJobResultResponse{Success: false}, fmt.Errorf("failed to update job status")
