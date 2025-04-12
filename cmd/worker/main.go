@@ -130,30 +130,31 @@ func runWorkerLoop(ctx context.Context, client pb.WorkerServiceClient) {
 // fetchAndProcessJob tries to get a job, process it, and submit the result.
 // Returns true if a job was found and processed (or attempted), false if no job was available.
 func fetchAndProcessJob(ctx context.Context, client pb.WorkerServiceClient) (jobAvailable bool, err error) {
-	// TODO: The current GetJob RPC requires a job_id, but the worker needs to ask for *any* available job.
-	// This assumes the server interprets a specific job_id (e.g., 0 or -1) as a request for the next available job,
-	// or associates the job based on the authenticated worker context.
-	// A better approach would be a dedicated RPC like `GetNextAvailableJob() returns (GetJobResponse)`.
-	req := &pb.GetJobRequest{JobId: 0} // Using 0 as a placeholder for "next available job"
-	log.Println("Requesting next available job...")
+	// Use the GetNextJob RPC to ask the server for the next available job for this authenticated worker.
+	req := &pb.GetNextJobRequest{} // No parameters needed for this request currently
+	log.Println("Requesting next available job via GetNextJob...")
 
 	getJobCtx, cancel := context.WithTimeout(ctx, 15*time.Second) // Timeout for getting a job
 	defer cancel()
 
-	resp, err := client.GetJob(getJobCtx, req)
+	resp, err := client.GetNextJob(getJobCtx, req) // <-- USE GetNextJob HERE
 	if err != nil {
-		// Check if the error is 'NotFound' indicating no job is available
+		// Check if the error is 'NotFound' indicating no job is available, as per the proto definition.
 		st, ok := status.FromError(err)
 		if ok && st.Code() == codes.NotFound {
 			return false, nil // No job available is not an error for the loop
 		}
-		return false, fmt.Errorf("failed to get job: %w", err)
+		// Other errors during the RPC call
+		return false, fmt.Errorf("failed to get next job: %w", err)
 	}
 
 	// Check if a valid job was returned (e.g., non-zero JobId)
 	// The server should return a non-nil response with JobId=0 or empty input if no job is ready.
+	// Or more likely, return the NotFound error handled above.
 	if resp == nil || resp.JobId == 0 || resp.Input == "" {
-		log.Println("Server indicated no job available.")
+		// This case might be redundant if the server correctly returns NotFound,
+		// but it's safe to keep as a fallback.
+		log.Println("Server indicated no job available (empty response).")
 		return false, nil // No job available
 	}
 
