@@ -25,7 +25,7 @@ func NewWorkerServiceServer(db *dbpkg.DB) *WorkerServiceServer {
 func (s *WorkerServiceServer) AuthenticateWorker(ctx context.Context, req *pb.AuthenticateWorkerRequest) (*pb.AuthenticateWorkerResponse, error) {
 	token := req.GetToken()
 
-	authToken, err := s.db.GetWorkerAuthToken(ctx, token)
+	authToken, err := s.db.GetLatestWorkerAuthTokenStatusByToken(ctx, token)
 	if err != nil {
 		log.Printf("Error getting worker auth token: %v", err)
 		return &pb.AuthenticateWorkerResponse{Authenticated: false}, fmt.Errorf("failed to authenticate worker")
