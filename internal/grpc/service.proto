@@ -22,13 +22,6 @@ message GetNextJobRequest {
   // map<string, string> capabilities = 2;
 }
 
-// The response message containing the job details.
-// Reusing GetJobResponse structure is likely fine.
-message GetJobResponse {
-  int64 job_id = 1;
-  string input = 2;
-}
-
 // The request message containing the job ID.
 message GetJobRequest {
   int64 job_id = 1;
@@ -43,9 +36,17 @@ message GetJobResponse {
 // The request message containing the job result.
 message SubmitJobResultRequest {
   int64 job_id = 1;
-  string result = 2;
-  string error = 3;
+  string result = 2; // Result if the job completed successfully
+  string error = 3;  // Error message if the job failed
 }
+
+// The response message for submitting a job result.
+// Can be empty if no specific information needs to be returned upon successful submission.
+message SubmitJobResultResponse {
+  // Optionally, could include a confirmation or status update
+  // bool success = 1;
+}
+
 
 // The greeting service definition.
 service WorkerService {
@@ -68,4 +69,3 @@ service WorkerService {
 // message GetJobRequest {
 //   int64 job_id = 1;
 // }
-
