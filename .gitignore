@@ -13,3 +13,7 @@
 /tmp
 _obj
 _test
+
+bin/
+
+*.pb.go

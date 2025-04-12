@@ -43,8 +43,7 @@ message SubmitJobResultRequest {
 // The response message for submitting a job result.
 // Can be empty if no specific information needs to be returned upon successful submission.
 message SubmitJobResultResponse {
-  // Optionally, could include a confirmation or status update
-  // bool success = 1;
+  bool success = 1;
 }
 
 
