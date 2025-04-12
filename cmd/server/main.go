@@ -1,4 +1,4 @@
-package server
+package main
 
 import (
 	"context"
@@ -7,7 +7,6 @@ import (
 	"os/signal"
 	"syscall"
 
-	"cmd/server"
 	dbpkg "internal/db"
 )
 
@@ -33,7 +32,7 @@ func main() {
 
 	// Start the gRPC server in a goroutine
 	go func() {
-		if err := server.ServeGRPC(db); err != nil {
+		if err := ServeGRPC(db); err != nil {
 			log.Fatalf("Failed to start gRPC server: %v", err)
 		}
 	}()
