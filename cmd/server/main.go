@@ -7,7 +7,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	dbpkg "internal/db"
+	dbpkg "github.com/nmnduy/vastai-client/internal/db"
 )
 
 func main() {

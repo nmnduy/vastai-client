@@ -207,5 +207,5 @@ var WorkerService_ServiceDesc = grpc.ServiceDesc{
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
-	Metadata: "internal/grpc/service.proto",
+	Metadata: "github.com/nmnduy/vastai-client/internal/grpc/service.proto",
 }

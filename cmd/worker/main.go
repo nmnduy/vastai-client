@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	pb "internal/grpc" // Import the generated protobuf code
+	pb "github.com/nmnduy/vastai-client/internal/grpc" // Import the generated protobuf code
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"

@@ -9,8 +9,8 @@ import (
 
 	"google.golang.org/grpc"
 
-	dbpkg "internal/db"
-	pb "internal/grpc"
+	dbpkg "github.com/nmnduy/vastai-client/internal/db"
+	pb "github.com/nmnduy/vastai-client/internal/grpc"
 )
 
 type WorkerServiceServer struct {

@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package vast;
 
-option go_package = "internal/grpc";
+option go_package = "github.com/nmnduy/vastai-client/internal/grpc";
 
 // The request message containing the worker token.
 message AuthenticateWorkerRequest {
