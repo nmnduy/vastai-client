@@ -370,7 +370,7 @@ const file_internal_grpc_service_proto_rawDesc = "" +
 	"\x12AuthenticateWorker\x12\x1f.vast.AuthenticateWorkerRequest\x1a .vast.AuthenticateWorkerResponse\"\x00\x12=\n" +
 	"\n" +
 	"GetNextJob\x12\x17.vast.GetNextJobRequest\x1a\x14.vast.GetJobResponse\"\x00\x12P\n" +
-	"\x0fSubmitJobResult\x12\x1c.vast.SubmitJobResultRequest\x1a\x1d.vast.SubmitJobResultResponse\"\x00B\x0fZ\rinternal/grpcb\x06proto3"
+	"\x0fSubmitJobResult\x12\x1c.vast.SubmitJobResultRequest\x1a\x1d.vast.SubmitJobResultResponse\"\x00B/Z-github.com/nmnduy/vastai-client/internal/grpcb\x06proto3"
 
 var (
 	file_internal_grpc_service_proto_rawDescOnce sync.Once

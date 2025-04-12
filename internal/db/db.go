@@ -87,12 +87,12 @@ type JobStatusParquet struct {
 // WorkerAuthTokenStatus represents a row in the worker_auth_token_status table.
 // Each row represents a state transition for a token identified by TokenID.
 type WorkerAuthTokenStatus struct {
-	ID         int            // Primary key for the status record
-	TokenID    string         // Groups status events for the same logical token
-	Token      string         // The actual unique token value
-	InstanceID sql.NullInt64  // Associated Vast AI instance ID
-	Status     string         // Status: created, validated, expired, invalidated
-	CreatedAt  time.Time      // Timestamp of this status event
+	ID         int           // Primary key for the status record
+	TokenID    string        // Groups status events for the same logical token
+	Token      string        // The actual unique token value
+	InstanceID sql.NullInt64 // Associated Vast AI instance ID
+	Status     string        // Status: created, validated, expired, invalidated
+	CreatedAt  time.Time     // Timestamp of this status event
 }
 
 // WorkerAuthTokenStatusParquet is a helper struct for Parquet serialization.
@@ -352,7 +352,7 @@ func (db *DB) GetOldWorkerAuthTokenStatusesPaged(ctx context.Context, retentionP
 }
 
 // GetOldInstanceStatusesPaged fetches a page of instance statuses older than the retention period.
-func (db *DB) GetOldInstanceStatusesPaged(ctx context.ंटext, retentionPeriod time.Duration, limit, offset int) ([]InstanceStatus, error) {
+func (db *DB) GetOldInstanceStatusesPaged(ctx context.Context, retentionPeriod time.Duration, limit, offset int) ([]InstanceStatus, error) {
 	cutoffTime := time.Now().Add(-retentionPeriod)
 	query := `
 		SELECT id, vast_ai_id, status, created_at
@@ -423,4 +423,3 @@ func (db *DB) GetOldJobStatusesPaged(ctx context.Context, retentionPeriod time.D
 
 	return statuses, nil
 }
-
