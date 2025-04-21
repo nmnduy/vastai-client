@@ -1,0 +1,27 @@
+# --- Build Stage ---
+FROM golang:1.21-alpine AS builder
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+WORKDIR /app/cmd/worker
+RUN CGO_ENABLED=0 go build -ldflags="-w -s" -o /worker main.go
+
+# --- Runtime Stage ---
+FROM alpine:latest
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+WORKDIR /app
+COPY --from=builder /worker /app/worker
+RUN chown appuser:appgroup /app/worker && chmod +x /app/worker
+USER appuser
+
+# Workers usually don't need exposed ports unless they host a status/debug endpoint
+# EXPOSE 8081 # Example if worker had a debug http server
+
+# Define the entrypoint for the container
+# WORKER_AUTH_TOKEN should be passed as an environment variable at runtime
+ENTRYPOINT ["/app/worker"]
+
+# Healthcheck might check DB connection or if the main loop is alive
+# HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+#   CMD pgrep -x worker || exit 1 # Basic process check
