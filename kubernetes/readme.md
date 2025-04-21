@@ -71,5 +71,3 @@ On the machine where you will run `docker push`, configure the Docker daemon to 
               image: docker-registry-internal-svc.registry:5000/your-app-server:latest
               # ...
     ```
-
-This setup gives you the best of both worlds: convenient external pushing via `NodePort` and robust, efficient internal pulling via `ClusterIP`.
