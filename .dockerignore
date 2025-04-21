@@ -1,0 +1,33 @@
+# Git specific
+.git
+.gitignore
+
+# Build artifacts (local)
+bin/
+*.exe
+*.test
+*.out
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# IDE specific
+.idea/
+.vscode/
+
+# Docs and misc
+*.md
+docs/
+todo.md
+
+# Local Go stuff
+vendor/
+
+# Docker files themselves if not needed inside context
+docker/
+Dockerfile*
+
+# Build scripts
+build.sh
+Makefile

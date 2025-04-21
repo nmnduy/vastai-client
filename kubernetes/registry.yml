@@ -1,0 +1,80 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: registry
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: registry-pvc
+  namespace: registry
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+  # storageClassName: local-path # Optional, depending on your provisioner
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: docker-registry
+  namespace: registry
+  labels:
+    app: docker-registry
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: docker-registry # <-- Both services will use this selector
+  template:
+    metadata:
+      labels:
+        app: docker-registry
+    spec:
+      volumes:
+        - name: registry-storage
+          persistentVolumeClaim:
+            claimName: registry-pvc
+      containers:
+        - name: registry
+          image: registry:2
+          ports:
+            - containerPort: 5000
+              name: registry-port
+          volumeMounts:
+            - name: registry-storage
+              mountPath: /var/lib/registry
+---
+# Service 1: ClusterIP for internal cluster access (Recommended for pulls)
+apiVersion: v1
+kind: Service
+metadata:
+  name: docker-registry-internal-svc # <--- Name for ClusterIP service
+  namespace: registry
+spec:
+  selector:
+    app: docker-registry # <--- Selects the registry pods
+  ports:
+    - protocol: TCP
+      port: 5000       # Internal cluster port
+      targetPort: 5000  # Port on the pod
+  type: ClusterIP # <--- Explicitly ClusterIP (or omit, as it's default)
+---
+# Service 2: NodePort for external push access
+apiVersion: v1
+kind: Service
+metadata:
+  name: docker-registry-nodeport-svc # <--- DIFFERENT Name for NodePort service
+  namespace: registry
+spec:
+  selector:
+    app: docker-registry # <--- Selects the SAME registry pods
+  type: NodePort # <--- Type NodePort
+  ports:
+    - protocol: TCP
+      port: 5000       # Internal cluster port this service listens on
+      targetPort: 5000  # Port on the pod to forward to
+      nodePort: 30050 # <--- The fixed port on node IPs (e.g., 192.168.1.100:30050)
