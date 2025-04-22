@@ -6,7 +6,7 @@ VERSION := $(shell cat VERSION)
 
 # Docker related variables
 # Define your docker registry/username here
-DOCKER_REGISTRY ?= localhost:30050 # Set registry to localhost:30050
+DOCKER_REGISTRY ?= localhost:30050
 SERVER_IMAGE = $(DOCKER_REGISTRY)/$(PROJECT_NAME)-server:$(VERSION)
 WORKER_IMAGE = $(DOCKER_REGISTRY)/$(PROJECT_NAME)-worker:$(VERSION)
 CLEANUP_IMAGE = $(DOCKER_REGISTRY)/$(PROJECT_NAME)-cleanup:$(VERSION)
