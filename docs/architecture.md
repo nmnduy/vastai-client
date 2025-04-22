@@ -1,7 +1,6 @@
 # Architecture
 
-- postgres DB:
-    - timescaledb extensions
+- SQLite DB:
     - tables
         - `instance_status` table
             - each record is the state of a vast AI node when we perform some action to it
