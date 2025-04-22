@@ -1,0 +1,125 @@
+# --- Deployment for the gRPC Server application with Litestream sidecar ---
+# No PersistentVolumeClaim is used. An emptyDir volume is used,
+# and Litestream restores the database from R2 on pod start if it doesn't exist locally.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vastai-client-server
+  labels:
+    app: vastai-client-server
+spec:
+  replicas: 1 # Keep replicas at 1 for SQLite writer safety
+  selector:
+    matchLabels:
+      app: vastai-client-server
+  template:
+    metadata:
+      labels:
+        app: vastai-client-server
+    spec:
+      volumes: # Define an emptyDir volume for ephemeral storage shared between containers
+      - name: db-storage
+        emptyDir: {} # Use an emptyDir volume, data is lost when pod terminates
+      containers:
+      - name: server # Main application container - **MUST NOT START BEFORE LITESTREAM RESTORE**
+        image: docker-registry-internal-svc.registry:5000/vastai-client-server:v0.0.1
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 50051
+          name: grpc
+          protocol: TCP
+        volumeMounts: # Mount the shared volume
+        - name: db-storage
+          mountPath: /data # Mount the emptyDir volume at /data
+        env:
+          # Database configuration - SQLite file path
+          # internal/db/db.go expects DATABASE_URL to be the path to the SQLite file.
+          # The file will be stored on the emptyDir volume mounted at /data.
+          - name: DATABASE_URL
+            value: "/data/vastai_status.db" # Path inside the container where the DB file will live
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+        livenessProbe:
+          tcpSocket:
+            port: grpc
+          initialDelaySeconds: 25 # Increase initial delay slightly to allow for restore
+          periodSeconds: 20
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          tcpSocket:
+            port: grpc
+          initialDelaySeconds: 15 # Increase initial delay slightly to allow for restore
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+
+      - name: litestream-sidecar # Litestream container for R2 replication/restore
+        image: litestream/litestream:latest # Use the official Litestream image
+        # Litestream will first attempt to restore the database from the R2 replica
+        # if it doesn't exist locally at /data/vastai_status.db.
+        # After restoring (or if the file exists), it will execute the main server process.
+        # While the server process runs, Litestream replicates changes back to R2.
+        # NOTE: The command/args for the 'server' container must be correct for -exec to work.
+        #       If the 'server' container defines its own command/args, remove them or
+        #       ensure they match what you want litestream to execute.
+        #       Here, we assume the server container's default entrypoint/cmd starts the server.
+        #       Replace '/usr/local/bin/server' if your server binary is elsewhere.
+        #       If the server container has ENTRYPOINT ["/bin/sh", "-c"] and CMD ["exec /path/to/server"],
+        #       you might need to adjust the -exec target. Often, just specifying the intended
+        #       final executable path works if the entrypoint handles it.
+        args:
+          - "replicate"
+          - "-exec"
+          # This command runs *after* Litestream potentially restores the database.
+          - "/server"
+          - "/data/vastai_status.db" # The database file to replicate/restore
+        env:
+          - name: LITESTREAM_REPLICA_URL
+            value: "r2://vastai-client/vastai_client.db"
+          # Load R2 credentials from the Kubernetes secret
+          - name: LITESTREAM_ACCESS_KEY_ID
+            valueFrom:
+              secretKeyRef:
+                name: r2-credentials # Name of the secret created earlier
+                key: LITESTREAM_ACCESS_KEY_ID # Key within the secret
+          - name: LITESTREAM_SECRET_ACCESS_KEY
+            valueFrom:
+              secretKeyRef:
+                name: r2-credentials # Name of the secret created earlier
+                key: LITESTREAM_SECRET_ACCESS_KEY # Key within the secret
+          - name: LITESTREAM_ENDPOINT_URL
+            value: https://d1d69208d12bdf919319004fa00204c5.r2.cloudflarestorage.com
+        volumeMounts:
+          - name: db-storage # Mount the same emptyDir volume as the server container
+            mountPath: /data # Mount path must match where the DB file is located
+        resources: # Resource requests/limits for the sidecar
+          requests:
+            cpu: "50m"
+            memory: "64Mi"
+          limits:
+            cpu: "100m"
+            memory: "128Mi"
+
+---
+# Service to expose the gRPC Server within the cluster
+apiVersion: v1
+kind: Service
+metadata:
+  name: vastai-client-server-service
+  labels:
+    app: vastai-client-server
+spec:
+  selector:
+    app: vastai-client-server
+  ports:
+    - protocol: TCP
+      port: 50051
+      targetPort: grpc # Points to the grpc port defined in the 'server' container
+      name: grpc
+  type: ClusterIP
