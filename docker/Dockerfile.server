@@ -1,8 +1,9 @@
 # --- Build Stage ---
 FROM golang:1.23-alpine AS builder
 
-# Install build dependencies if needed (e.g., git, tools for CGO)
-# RUN apk add --no-cache git build-base
+# Install build dependencies
+# protoc is needed to compile proto files
+RUN apk add --no-cache git build-base protobuf-dev
 
 WORKDIR /app
 
@@ -10,44 +11,21 @@ WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 
+# Generate proto files inside the builder if they aren't checked into git
+# This ensures the build environment has the generated code without relying on the host
+COPY internal/grpc/service.proto internal/grpc/service.proto
+# Install Go gRPC generators
+RUN go install google.golang.org/protobuf/cmd/protoc-gen-go@latest && \
+    go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+# Run protoc to generate Go code from the proto file
+RUN protoc --go_out=. --go_opt=paths=source_relative \
+           --go-grpc_out=. --go-grpc_opt=paths=source_relative \
+           internal/grpc/service.proto
+
 # Copy the rest of the application source code
 COPY . .
 
 # Build the server binary
 # Use CGO_ENABLED=0 for static linking unless you need CGO. Static linking is often easier with Alpine.
 # Use -ldflags="-w -s" to strip debug symbols and reduce binary size for production.
-WORKDIR /app/cmd/server
-RUN CGO_ENABLED=0 go build -ldflags="-w -s" -o /server main.go
-
-
-# --- Runtime Stage ---
-FROM alpine:3.19
-
-# Create a non-root user and group
-RUN addgroup -S appgroup && adduser -S appuser -G appgroup
-
-WORKDIR /app
-
-# Copy the compiled binary from the builder stage
-COPY --from=builder /server /app/server
-
-# Copy any necessary static assets or config files (if any)
-# Example: COPY --from=builder /app/config.yaml /app/config.yaml
-
-# Ensure the binary is executable
-RUN chown appuser:appgroup /app/server && chmod +x /app/server
-
-# Switch to the non-root user
-USER appuser
-
-# Expose the gRPC port the server listens on (adjust if different)
-# This is documentation; you still need to map it during `docker run` or in cloud config.
-EXPOSE 50051
-
-# Define the entrypoint for the container
-ENTRYPOINT ["/app/server"]
-
-# Optional: Add a basic healthcheck (adjust command as needed)
-# HEALTHCHECK --interval=15s --timeout=3s --start-period=5s --retries=3 \
-#   CMD ["/app/server", "--healthcheck"] # Assuming your app has a healthcheck flag
-# Or use grpc-health-probe if you implement the gRPC health checking protocol
+RUN CGO_ENABLED=0 go build -ldflags="-w -s" -o /server ./cmd/server
