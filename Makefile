@@ -40,6 +40,9 @@ build: $(BIN_DIR)/server $(BIN_DIR)/worker $(BIN_DIR)/cleanup
 proto: $(PROTO_GO_FILES)
 
 $(PROTO_GO_FILES): $(PROTO_FILE)
+	# Ensure the gRPC code generator plugin is installed
+	@echo "Installing/updating protoc-gen-go-grpc..."
+	@go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
 	@echo "Generating gRPC code..."
 	@protoc --go_out=. --go_opt=paths=source_relative \
 	       --go-grpc_out=. --go-grpc_opt=paths=source_relative \
