@@ -584,19 +584,27 @@ func checkPragmaSettings(db *sql.DB) map[string]string {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	err = db.QueryRowContext(ctx, "PRAGMA journal_mode;").Scan(&options["journal_mode"])
+	// Declare temporary variables to scan into, as we cannot take the address of map elements.
+	var journalMode string
+	var synchronous string
+	var foreignKeys string
+	var busyTimeout string
+
+	err = db.QueryRowContext(ctx, "PRAGMA journal_mode;").Scan(&journalMode)
 	if err != nil {
 		log.Printf("Error getting PRAGMA journal_mode: %v", err)
 		options["journal_mode"] = "error" // Indicate failure
+	} else {
+		options["journal_mode"] = journalMode
 	}
 
-	err = db.QueryRowContext(ctx, "PRAGMA synchronous;").Scan(&options["synchronous"])
+	err = db.QueryRowContext(ctx, "PRAGMA synchronous;").Scan(&synchronous)
 	if err != nil {
 		log.Printf("Error getting PRAGMA synchronous: %v", err)
 		options["synchronous"] = "error" // Indicate failure
 	} else {
 		// SQLite returns 0, 1, 2, 3 for synchronous levels. Let's map them.
-		switch options["synchronous"] {
+		switch synchronous {
 		case "0":
 			options["synchronous"] = "OFF (0)"
 		case "1":
@@ -605,26 +613,32 @@ func checkPragmaSettings(db *sql.DB) map[string]string {
 			options["synchronous"] = "FULL (2)"
 		case "3":
 			options["synchronous"] = "EXTRA (3)"
+		default:
+			options["synchronous"] = synchronous // Keep original value if not standard
 		}
 	}
 
-	err = db.QueryRowContext(ctx, "PRAGMA foreign_keys;").Scan(&options["foreign_keys"])
+	err = db.QueryRowContext(ctx, "PRAGMA foreign_keys;").Scan(&foreignKeys)
 	if err != nil {
 		log.Printf("Error getting PRAGMA foreign_keys: %v", err)
 		options["foreign_keys"] = "error" // Indicate failure
 	} else {
-		switch options["foreign_keys"] {
+		switch foreignKeys {
 		case "0":
 			options["foreign_keys"] = "OFF (0)"
 		case "1":
 			options["foreign_keys"] = "ON (1)"
+		default:
+			options["foreign_keys"] = foreignKeys // Keep original value if not standard
 		}
 	}
 
-	err = db.QueryRowContext(ctx, "PRAGMA busy_timeout;").Scan(&options["busy_timeout"])
+	err = db.QueryRowContext(ctx, "PRAGMA busy_timeout;").Scan(&busyTimeout)
 	if err != nil {
 		log.Printf("Error getting PRAGMA busy_timeout: %v", err)
 		options["busy_timeout"] = "error" // Indicate failure
+	} else {
+		options["busy_timeout"] = busyTimeout
 	}
 
 	// Get and log connection pool statistics
