@@ -21,7 +21,7 @@ RUN CGO_ENABLED=0 go build -ldflags="-w -s" -o /server main.go
 
 
 # --- Runtime Stage ---
-FROM alpine:latest
+FROM alpine:3.19
 
 # Create a non-root user and group
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup

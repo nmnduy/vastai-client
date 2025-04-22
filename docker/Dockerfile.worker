@@ -8,7 +8,7 @@ WORKDIR /app/cmd/worker
 RUN CGO_ENABLED=0 go build -ldflags="-w -s" -o /worker main.go
 
 # --- Runtime Stage ---
-FROM alpine:latest
+FROM alpine:3.19
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 WORKDIR /app
 COPY --from=builder /worker /app/worker
