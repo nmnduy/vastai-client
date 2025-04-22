@@ -17,3 +17,6 @@ _test
 bin/
 
 *.pb.go
+
+
+kubernetes/secrets

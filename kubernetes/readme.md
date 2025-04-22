@@ -71,3 +71,25 @@ On the machine where you will run `docker push`, configure the Docker daemon to 
               image: docker-registry-internal-svc.registry:5000/your-app-server:latest
               # ...
     ```
+
+## Secrets to setup in kubernetes
+
+```yaml
+# kubernetes/secrets/r2-credentials.yml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: r2-credentials
+type: Opaque
+data:
+  LITESTREAM_ACCESS_KEY_ID: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+  LITESTREAM_SECRET_ACCESS_KEY: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx=
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: r2-api-token
+type: Opaque
+data:
+  TOKEN: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx=
+```
