@@ -15,13 +15,4 @@ COPY --from=builder /worker /app/worker
 RUN chown appuser:appgroup /app/worker && chmod +x /app/worker
 USER appuser
 
-# Workers usually don't need exposed ports unless they host a status/debug endpoint
-# EXPOSE 8081 # Example if worker had a debug http server
-
-# Define the entrypoint for the container
-# WORKER_AUTH_TOKEN should be passed as an environment variable at runtime
 ENTRYPOINT ["/app/worker"]
-
-# Healthcheck might check DB connection or if the main loop is alive
-# HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-#   CMD pgrep -x worker || exit 1 # Basic process check

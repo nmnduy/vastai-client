@@ -29,3 +29,9 @@ COPY . .
 # Use CGO_ENABLED=0 for static linking unless you need CGO. Static linking is often easier with Alpine.
 # Use -ldflags="-w -s" to strip debug symbols and reduce binary size for production.
 RUN CGO_ENABLED=0 go build -ldflags="-w -s" -o /server ./cmd/server
+
+FROM alpine:3.19
+
+COPY --from=builder /server /server
+
+ENTRYPOINT ["/server"]
