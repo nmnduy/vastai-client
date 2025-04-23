@@ -1,0 +1,39 @@
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: vastai-client-cleanup-cronjob
+  labels:
+    app: vastai-client-cleanup
+spec:
+  # Run daily at 3:00 AM UTC
+  schedule: "0 3 * * *"
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app: vastai-client-cleanup
+        spec:
+          restartPolicy: OnFailure
+          volumes:
+            - name: db-storage
+              persistentVolumeClaim:
+                claimName: vastai-db-pvc
+          containers:
+            - name: cleanup
+              image: 073692673157.dkr.ecr.ap-southeast-1.amazonaws.com/vastai-client-cleanup:v0.0.2
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: DATABASE_URL
+                  value: "/data/vastai_status.db"
+              volumeMounts:
+                - name: db-storage
+                  mountPath: /data
+              resources:
+                requests:
+                  cpu: "50m"
+                  memory: "64Mi"
+                limits:
+                  cpu: "100m"
+                  memory: "128Mi"
