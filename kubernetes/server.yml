@@ -2,13 +2,13 @@
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: vastai-db-pvc # Name of the PVC
+  name: vastai-db-pvc
 spec:
   accessModes:
-    - ReadWriteOnce # Suitable for single-node access, common for block storage
+    - ReadWriteOnce
   resources:
     requests:
-      storage: 200Gi # Request 200Gi of storage
+      storage: 200Gi
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -17,7 +17,7 @@ metadata:
   labels:
     app: vastai-client-server
 spec:
-  replicas: 1 # Keep replicas at 1 for SQLite writer safety
+  replicas: 1
   selector:
     matchLabels:
       app: vastai-client-server
@@ -26,23 +26,22 @@ spec:
       labels:
         app: vastai-client-server
     spec:
-      volumes: # Define the volume using the PersistentVolumeClaim
+      volumes:
       - name: db-storage
         persistentVolumeClaim:
-          claimName: vastai-db-pvc # Reference the PVC created above
+          claimName: vastai-db-pvc
       containers:
-      - name: server # Main application container
+      - name: server
         image: 073692673157.dkr.ecr.ap-southeast-1.amazonaws.com/vastai-client-server:v0.0.2
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 50051
           name: grpc
           protocol: TCP
-        volumeMounts: # Mount the PVC volume
+        volumeMounts:
         - name: db-storage
-          mountPath: /data # Mount the PVC volume at /data
+          mountPath: /data
         env:
-          # Database configuration - SQLite file path on the PVC
           - name: DATABASE_URL
             value: "/data/vastai_status.db"
         resources:
@@ -55,7 +54,6 @@ spec:
         livenessProbe:
           tcpSocket:
             port: grpc
-          # Delays might still be relevant if Litestream restore takes time on first start
           initialDelaySeconds: 25
           periodSeconds: 20
           timeoutSeconds: 5
@@ -76,17 +74,16 @@ metadata:
   name: litestream-config
 data:
   litestream.yml: |
-    # Global S3 credentials (using environment variables from K8s secret)
     access-key-id: ${LITESTREAM_ACCESS_KEY_ID}
     secret-access-key: ${LITESTREAM_SECRET_ACCESS_KEY}
 
     dbs:
-      - path: /data/vastai_status.db # Path where the database is mounted inside the container
+      - path: /data/vastai_status.db
         replicas:
-          - type: s3                   # Use 's3' type for S3-compatible storage
-            bucket: vastai-client      # Your R2 bucket name
-            path: vastai_client.db     # Path within the bucket to store the replica
-            endpoint: https://d1d69208d12bdf919319004fa00204c5.r2.cloudflarestorage.com # R2 endpoint URL
+          - type: s3
+            bucket: vastai-client
+            path: vastai_client.db
+            endpoint: https://d1d69208d12bdf919319004fa00204c5.r2.cloudflarestorage.com
 
 ---
 apiVersion: apps/v1
@@ -106,24 +103,20 @@ spec:
         app: litestream-replicator
     spec:
       volumes:
-      # Define the volume using the same PersistentVolumeClaim
       - name: db-storage
         persistentVolumeClaim:
-          claimName: vastai-db-pvc # Reference the PVC
-      # Add volume for the ConfigMap
+          claimName: vastai-db-pvc
       - name: config-volume
         configMap:
-          name: litestream-config # Reference the ConfigMap created above
+          name: litestream-config
       containers:
       - name: litestream
         image: litestream/litestream:latest
         args:
-          # Use the config file instead of command line args for db/replica
           - "replicate"
           - "-config"
-          - "/etc/litestream.yml" # Path where the config file is mounted
+          - "/etc/litestream.yml"
         env:
-          # Load R2 credentials from the Kubernetes secret
           - name: LITESTREAM_ACCESS_KEY_ID
             valueFrom:
               secretKeyRef:
@@ -134,15 +127,13 @@ spec:
               secretKeyRef:
                 name: r2-credentials
                 key: LITESTREAM_SECRET_ACCESS_KEY
-          # No longer need LITESTREAM_ENDPOINT_URL env var, it's in the config file
         volumeMounts:
-          - name: db-storage # Mount the PVC volume
-            mountPath: /data # Mount path must match the 'path' in litestream.yml
-          # Mount the config file into the container
+          - name: db-storage
+            mountPath: /data
           - name: config-volume
-            mountPath: /etc/litestream.yml # Default config file path
-            subPath: litestream.yml       # Mount only the litestream.yml key
-            readOnly: true                # Config file doesn't need to be writable
+            mountPath: /etc/litestream.yml
+            subPath: litestream.yml
+            readOnly: true
         resources:
           requests:
             cpu: "50m"
@@ -150,9 +141,7 @@ spec:
           limits:
             cpu: "100m"
             memory: "128Mi"
-
 ---
-# Service to expose the gRPC Server within the cluster
 apiVersion: v1
 kind: Service
 metadata:
@@ -165,9 +154,10 @@ spec:
   ports:
     - protocol: TCP
       port: 50051
-      targetPort: grpc # Points to the grpc port defined in the 'server' container
+      targetPort: grpc
       name: grpc
   type: ClusterIP
+
 ---
 apiVersion: apps/v1
 kind: Deployment
