@@ -22,7 +22,7 @@ spec:
         emptyDir: {} # Use an emptyDir volume, data is lost when pod terminates
       containers:
       - name: server # Main application container - **MUST NOT START BEFORE LITESTREAM RESTORE**
-        image: docker-registry-internal-svc.registry:5000/vastai-client-server:v0.0.1
+        image: 073692673157.dkr.ecr.ap-southeast-1.amazonaws.com/vastai-client-server:v0.0.1
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 50051
