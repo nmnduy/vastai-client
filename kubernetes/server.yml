@@ -168,3 +168,40 @@ spec:
       targetPort: grpc # Points to the grpc port defined in the 'server' container
       name: grpc
   type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sqlite-inspector
+  labels:
+    app: sqlite-inspector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sqlite-inspector
+  template:
+    metadata:
+      labels:
+        app: sqlite-inspector
+    spec:
+      volumes:
+        - name: db-storage
+          persistentVolumeClaim:
+            claimName: vastai-db-pvc
+      containers:
+      - name: inspector
+        image: ubuntu:latest
+        command: ["/bin/sh", "-c"]
+        args:
+          - apt-get update && apt-get install -y sqlite3 && echo 'SQLite3 installed. Sleeping indefinitely...' && sleep infinity
+        volumeMounts:
+          - name: db-storage
+            mountPath: /data
+        resources:
+          requests:
+            cpu: "50m"
+            memory: "64Mi"
+          limits:
+            cpu: "100m"
+            memory: "128Mi"
