@@ -32,7 +32,7 @@ spec:
           claimName: vastai-db-pvc
       containers:
       - name: server
-        image: 073692673157.dkr.ecr.ap-southeast-1.amazonaws.com/vastai-client-server:v0.0.2
+        image: 073692673157.dkr.ecr.ap-southeast-1.amazonaws.com/vastai-client-server:v0.0.3
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 50051
