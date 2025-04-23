@@ -1,6 +1,15 @@
-# --- Deployment for the gRPC Server application with Litestream sidecar ---
-# No PersistentVolumeClaim is used. An emptyDir volume is used,
-# and Litestream restores the database from R2 on pod start if it doesn't exist locally.
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: vastai-db-pvc # Name of the PVC
+spec:
+  accessModes:
+    - ReadWriteOnce # Suitable for single-node access, common for block storage
+  resources:
+    requests:
+      storage: 200Gi # Request 200Gi of storage
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -17,26 +26,25 @@ spec:
       labels:
         app: vastai-client-server
     spec:
-      volumes: # Define an emptyDir volume for ephemeral storage shared between containers
+      volumes: # Define the volume using the PersistentVolumeClaim
       - name: db-storage
-        emptyDir: {} # Use an emptyDir volume, data is lost when pod terminates
+        persistentVolumeClaim:
+          claimName: vastai-db-pvc # Reference the PVC created above
       containers:
-      - name: server # Main application container - **MUST NOT START BEFORE LITESTREAM RESTORE**
+      - name: server # Main application container
         image: 073692673157.dkr.ecr.ap-southeast-1.amazonaws.com/vastai-client-server:v0.0.1
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 50051
           name: grpc
           protocol: TCP
-        volumeMounts: # Mount the shared volume
+        volumeMounts: # Mount the PVC volume
         - name: db-storage
-          mountPath: /data # Mount the emptyDir volume at /data
+          mountPath: /data # Mount the PVC volume at /data
         env:
-          # Database configuration - SQLite file path
-          # internal/db/db.go expects DATABASE_URL to be the path to the SQLite file.
-          # The file will be stored on the emptyDir volume mounted at /data.
+          # Database configuration - SQLite file path on the PVC
           - name: DATABASE_URL
-            value: "/data/vastai_status.db" # Path inside the container where the DB file will live
+            value: "/data/vastai_status.db"
         resources:
           requests:
             cpu: "100m"
@@ -47,58 +55,69 @@ spec:
         livenessProbe:
           tcpSocket:
             port: grpc
-          initialDelaySeconds: 25 # Increase initial delay slightly to allow for restore
+          # Delays might still be relevant if Litestream restore takes time on first start
+          initialDelaySeconds: 25
           periodSeconds: 20
           timeoutSeconds: 5
           failureThreshold: 3
         readinessProbe:
           tcpSocket:
             port: grpc
-          initialDelaySeconds: 15 # Increase initial delay slightly to allow for restore
+          initialDelaySeconds: 15
           periodSeconds: 10
           timeoutSeconds: 5
           failureThreshold: 3
-
-      - name: litestream-sidecar # Litestream container for R2 replication/restore
-        image: litestream/litestream:latest # Use the official Litestream image
-        # Litestream will first attempt to restore the database from the R2 replica
-        # if it doesn't exist locally at /data/vastai_status.db.
-        # After restoring (or if the file exists), it will execute the main server process.
-        # While the server process runs, Litestream replicates changes back to R2.
-        # NOTE: The command/args for the 'server' container must be correct for -exec to work.
-        #       If the 'server' container defines its own command/args, remove them or
-        #       ensure they match what you want litestream to execute.
-        #       Here, we assume the server container's default entrypoint/cmd starts the server.
-        #       Replace '/usr/local/bin/server' if your server binary is elsewhere.
-        #       If the server container has ENTRYPOINT ["/bin/sh", "-c"] and CMD ["exec /path/to/server"],
-        #       you might need to adjust the -exec target. Often, just specifying the intended
-        #       final executable path works if the entrypoint handles it.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: litestream-replicator
+  labels:
+    app: litestream-replicator
+spec:
+  replicas: 1 # Only one replicator is needed
+  selector:
+    matchLabels:
+      app: litestream-replicator
+  template:
+    metadata:
+      labels:
+        app: litestream-replicator
+    spec:
+      volumes: # Define the volume using the same PersistentVolumeClaim
+      - name: db-storage
+        persistentVolumeClaim:
+          claimName: vastai-db-pvc # Reference the PVC
+      containers:
+      - name: litestream
+        image: litestream/litestream:latest
         args:
+          # Run replicate command directly (no -exec needed)
           - "replicate"
-          - "-exec"
-          # This command runs *after* Litestream potentially restores the database.
-          - "/server"
-          - "/data/vastai_status.db" # The database file to replicate/restore
+          - "/data/vastai_status.db" # The database file on the PVC to replicate/restore
+          - "r2://vastai-client/vastai_client.db" # Replica URL destination
         env:
+          # Set replica URL env var (optional as it's in args, but good practice)
           - name: LITESTREAM_REPLICA_URL
             value: "r2://vastai-client/vastai_client.db"
           # Load R2 credentials from the Kubernetes secret
           - name: LITESTREAM_ACCESS_KEY_ID
             valueFrom:
               secretKeyRef:
-                name: r2-credentials # Name of the secret created earlier
-                key: LITESTREAM_ACCESS_KEY_ID # Key within the secret
+                name: r2-credentials
+                key: LITESTREAM_ACCESS_KEY_ID
           - name: LITESTREAM_SECRET_ACCESS_KEY
             valueFrom:
               secretKeyRef:
-                name: r2-credentials # Name of the secret created earlier
-                key: LITESTREAM_SECRET_ACCESS_KEY # Key within the secret
+                name: r2-credentials
+                key: LITESTREAM_SECRET_ACCESS_KEY
+          # R2 endpoint URL
           - name: LITESTREAM_ENDPOINT_URL
             value: https://d1d69208d12bdf919319004fa00204c5.r2.cloudflarestorage.com
         volumeMounts:
-          - name: db-storage # Mount the same emptyDir volume as the server container
+          - name: db-storage # Mount the PVC volume
             mountPath: /data # Mount path must match where the DB file is located
-        resources: # Resource requests/limits for the sidecar
+        resources: # Resource requests/limits for Litestream
           requests:
             cpu: "50m"
             memory: "64Mi"
