@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -46,7 +47,7 @@ func NewDB(ctx context.Context) (*DB, error) {
 
 // init initializes the global database connection exactly once.
 // It reads the database path, applies necessary options, opens the connection,
-// sets connection limits, and verifies PRAGMA settings.
+// sets connection limits, verifies PRAGMA settings, and applies migrations.
 // If any step fails, it sets initErr, and subsequent calls to NewDB will fail.
 func init() {
 	once.Do(func() {
@@ -79,9 +80,9 @@ func init() {
 		setMaxOpenConns(globalDB)
 
 		// Check database connectivity.
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		initErr = globalDB.PingContext(ctx)
+		pingCtx, pingCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		initErr = globalDB.PingContext(pingCtx)
+		pingCancel() // Cancel context immediately after use
 		if initErr != nil {
 			initErr = fmt.Errorf("failed to ping database: %w", initErr)
 			log.Printf("Error initializing database: %v", initErr)
@@ -93,9 +94,27 @@ func init() {
 			return
 		}
 
+		// Apply database migrations
+		log.Println("Applying database migrations...")
+		migrationCtx, migrationCancel := context.WithTimeout(context.Background(), 30*time.Second) // Allow more time for migrations
+		initErr = ApplyMigrations(migrationCtx, globalDB)
+		migrationCancel() // Cancel context immediately after use
+		if initErr != nil {
+			initErr = fmt.Errorf("failed to apply database migrations: %w", initErr)
+			log.Printf("Error initializing database: %v", initErr)
+			// Close the connection pool as migrations failed
+			if closeErr := globalDB.Close(); closeErr != nil {
+				log.Printf("Error closing database after migration failure: %v", closeErr)
+			}
+			globalDB = nil
+			return
+		}
+		log.Println("Database migrations applied successfully.")
+
 		// Check and log the actual PRAGMA settings applied.
 		settings := checkPragmaSettings(globalDB)
-		log.Printf("SQLite PRAGMA settings confirmed: journal_mode=%s, synchronous=%s", settings["journal_mode"], settings["synchronous"])
+		log.Printf("SQLite PRAGMA settings confirmed: journal_mode=%s, synchronous=%s, foreign_keys=%s, busy_timeout=%s",
+			settings["journal_mode"], settings["synchronous"], settings["foreign_keys"], settings["busy_timeout"])
 		log.Println("Database initialization successful.")
 	})
 }
@@ -175,7 +194,7 @@ type WorkerAuthTokenStatusParquet struct {
 // InsertInstanceStatus inserts a new instance status record into the database.
 func (db *DB) InsertInstanceStatus(ctx context.Context, vastAIID int, status string) error {
 	// Use CURRENT_TIMESTAMP for SQLite and ? for placeholders
-	query := `INSERT INTO instance_status (vast_ai_id, status, created_at) VALUES (?, ?, CURRENT_TIMESTAMP)`
+	query := `INSERT INTO instance_status (vast_ai_id, status) VALUES (?, ?)` // Rely on DEFAULT for created_at
 	_, err := db.Conn.ExecContext(ctx, query, vastAIID, status)
 	if err != nil {
 		return fmt.Errorf("failed to insert instance status: %w", err)
@@ -204,7 +223,7 @@ func (db *DB) GetInstanceStatus(ctx context.Context, vastAIID int) (*InstanceSta
 // InsertJobStatus inserts a new job status record into the database.
 func (db *DB) InsertJobStatus(ctx context.Context, jobID, status string, instanceID *int64, input *string) error {
 	// Use CURRENT_TIMESTAMP for SQLite and ? for placeholders
-	query := `INSERT INTO job_status (job_id, status, created_at, instance_id, input) VALUES (?, ?, CURRENT_TIMESTAMP, ?, ?)`
+	query := `INSERT INTO job_status (job_id, status, instance_id, input) VALUES (?, ?, ?, ?)` // Rely on DEFAULT for created_at
 
 	var instanceIDValue sql.NullInt64
 	if instanceID != nil {
@@ -224,10 +243,17 @@ func (db *DB) InsertJobStatus(ctx context.Context, jobID, status string, instanc
 }
 
 // UpdateJobStatus adds a new record representing the updated status for a job.
+// This function assumes that when updating (e.g., to completed/failed), we are creating a *new* status record
+// for that job, preserving history. The instance_id and input are typically set on creation.
 func (db *DB) UpdateJobStatus(ctx context.Context, jobID, status string, errorMsg, result *string) error {
-	// Use CURRENT_TIMESTAMP for SQLite and ? for placeholders
-	query := `INSERT INTO job_status (job_id, status, created_at, instance_id, error, result)
-	          VALUES (?, ?, CURRENT_TIMESTAMP, NULL, ?, ?)`
+	// Get the latest instance ID and input associated with this job ID to preserve them if needed,
+	// although typically these might not change after the 'created' state.
+	// For simplicity here, we insert a new row without carrying over instance_id/input,
+	// assuming the GetJobStatus logic always fetches the LATEST row, which will have the final status.
+	// If you need to associate the final state with the original instance_id/input, you'd query first or adjust the Insert.
+
+	query := `INSERT INTO job_status (job_id, status, error, result)
+	          VALUES (?, ?, ?, ?)` // Rely on DEFAULT for created_at, instance_id/input default to NULL
 
 	var errorValue sql.NullString
 	if errorMsg != nil {
@@ -281,7 +307,7 @@ func (db *DB) GetJobStatus(ctx context.Context, jobID string) (*JobStatus, error
 // InsertWorkerAuthTokenStatus inserts a new worker auth token status record.
 func (db *DB) InsertWorkerAuthTokenStatus(ctx context.Context, tokenID, token string, instanceID *int64, status string) error {
 	// Use CURRENT_TIMESTAMP for SQLite and ? for placeholders
-	query := `INSERT INTO worker_auth_token_status (token_id, token, instance_id, status, created_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)`
+	query := `INSERT INTO worker_auth_token_status (token_id, token, instance_id, status) VALUES (?, ?, ?, ?)` // Rely on DEFAULT for created_at
 
 	var instanceIDValue sql.NullInt64
 	if instanceID != nil {
@@ -291,6 +317,11 @@ func (db *DB) InsertWorkerAuthTokenStatus(ctx context.Context, tokenID, token st
 	_, err := db.Conn.ExecContext(ctx, query, tokenID, token, instanceIDValue, status)
 	if err != nil {
 		// Avoid logging the actual token value for security. Log tokenID if needed.
+		// Check for UNIQUE constraint violation specifically if helpful
+		if strings.Contains(err.Error(), "UNIQUE constraint failed: worker_auth_token_status.token") {
+			// Don't log token here either
+			return fmt.Errorf("failed to insert worker auth token status (token_id: %s): unique token constraint violated", tokenID)
+		}
 		return fmt.Errorf("failed to insert worker auth token status (token_id: %s): %w", tokenID, err)
 	}
 	return nil
@@ -304,7 +335,7 @@ func (db *DB) GetLatestWorkerAuthTokenStatusByToken(ctx context.Context, token s
 		FROM worker_auth_token_status
 		WHERE token = ?
 		ORDER BY created_at DESC
-		LIMIT 1`
+		LIMIT 1` // Ordering by created_at is technically not needed due to UNIQUE constraint on token, but good practice.
 	row := db.Conn.QueryRowContext(ctx, query, token)
 
 	var tokenStatus WorkerAuthTokenStatus
@@ -332,8 +363,9 @@ func (db *DB) DeleteOldWorkerAuthTokenStatuses(ctx context.Context, retentionPer
 	cutoffTime := time.Now().Add(-retentionPeriod)
 	// Use ? for placeholder
 	// Assumes created_at is stored in a format comparable by SQLite (e.g., TEXT ISO8601 or INTEGER Unix timestamp)
+	// SQLite's default CURRENT_TIMESTAMP stores TEXT in 'YYYY-MM-DD HH:MM:SS' format, which is comparable.
 	query := `DELETE FROM worker_auth_token_status WHERE created_at < ?`
-	result, err := db.Conn.ExecContext(ctx, query, cutoffTime)
+	result, err := db.Conn.ExecContext(ctx, query, cutoffTime.Format("2006-01-02 15:04:05")) // Use standard SQLite time format
 	if err != nil {
 		return 0, fmt.Errorf("failed to delete old worker auth token statuses: %w", err)
 	}
@@ -351,7 +383,7 @@ func (db *DB) DeleteOldInstanceStatuses(ctx context.Context, retentionPeriod tim
 	cutoffTime := time.Now().Add(-retentionPeriod)
 	// Use ? for placeholder
 	query := `DELETE FROM instance_status WHERE created_at < ?`
-	result, err := db.Conn.ExecContext(ctx, query, cutoffTime)
+	result, err := db.Conn.ExecContext(ctx, query, cutoffTime.Format("2006-01-02 15:04:05")) // Use standard SQLite time format
 	if err != nil {
 		return 0, fmt.Errorf("failed to delete old instance statuses: %w", err)
 	}
@@ -368,7 +400,7 @@ func (db *DB) DeleteOldJobStatuses(ctx context.Context, retentionPeriod time.Dur
 	cutoffTime := time.Now().Add(-retentionPeriod)
 	// Use ? for placeholder
 	query := `DELETE FROM job_status WHERE created_at < ?`
-	result, err := db.Conn.ExecContext(ctx, query, cutoffTime)
+	result, err := db.Conn.ExecContext(ctx, query, cutoffTime.Format("2006-01-02 15:04:05")) // Use standard SQLite time format
 	if err != nil {
 		return 0, fmt.Errorf("failed to delete old job statuses: %w", err)
 	}
@@ -393,7 +425,7 @@ func (db *DB) GetOldWorkerAuthTokenStatusesPaged(ctx context.Context, retentionP
 		ORDER BY created_at
 		LIMIT ? OFFSET ?`
 
-	rows, err := db.Conn.QueryContext(ctx, query, cutoffTime, limit, offset)
+	rows, err := db.Conn.QueryContext(ctx, query, cutoffTime.Format("2006-01-02 15:04:05"), limit, offset) // Use standard SQLite time format
 	if err != nil {
 		return nil, fmt.Errorf("failed to query old worker auth token statuses (paged): %w", err)
 	}
@@ -433,7 +465,7 @@ func (db *DB) GetOldInstanceStatusesPaged(ctx context.Context, retentionPeriod t
 		ORDER BY created_at -- Consistent ordering is important for pagination
 		LIMIT ? OFFSET ?`
 
-	rows, err := db.Conn.QueryContext(ctx, query, cutoffTime, limit, offset)
+	rows, err := db.Conn.QueryContext(ctx, query, cutoffTime.Format("2006-01-02 15:04:05"), limit, offset) // Use standard SQLite time format
 	if err != nil {
 		return nil, fmt.Errorf("failed to query old instance statuses (paged): %w", err)
 	}
@@ -466,7 +498,7 @@ func (db *DB) GetOldJobStatusesPaged(ctx context.Context, retentionPeriod time.D
 		ORDER BY created_at -- Consistent ordering is important for pagination
 		LIMIT ? OFFSET ?`
 
-	rows, err := db.Conn.QueryContext(ctx, query, cutoffTime, limit, offset)
+	rows, err := db.Conn.QueryContext(ctx, query, cutoffTime.Format("2006-01-02 15:04:05"), limit, offset) // Use standard SQLite time format
 	if err != nil {
 		return nil, fmt.Errorf("failed to query old job statuses (paged): %w", err)
 	}
@@ -539,12 +571,20 @@ func AddSQLiteOptions(dbPath string) (string, error) {
 	}
 
 	q := u.Query()
+	modified := false
 	for key, value := range options {
 		// Add option only if not already present in the DSN
 		if q.Get(key) == "" {
 			q.Set(key, value)
+			modified = true
 		}
 	}
+
+	// Only modify the DSN if options were actually added
+	if !modified && !strings.Contains(dbPath, "?") {
+		return dbPath, nil // Return original path if no options needed adding and none existed
+	}
+
 	u.RawQuery = q.Encode()
 
 	// Return the path with encoded query parameters.
@@ -556,9 +596,22 @@ func AddSQLiteOptions(dbPath string) (string, error) {
 		// u.Path might have a leading slash if parsed from "file:/path", remove it if needed,
 		// but usually fine. sqlite3 driver handles `file:path?query` and `path?query`.
 		res := u.Path
-		if u.RawQuery != "" {
-			res += "?" + u.RawQuery
+		// If the original path input did not contain '?', append '?'.
+		// This handles edge cases where url.Parse might interpret parts of the path.
+		// Safest is to check if the original dbPath contained '?'
+		if !strings.Contains(dbPath, "?") {
+			if u.RawQuery != "" {
+				res += "?" + u.RawQuery
+			}
+		} else {
+			// If original path had '?', RawQuery should be appended correctly.
+			// We rely on url.URL structure here. Path should be correct.
+			if u.RawQuery != "" {
+				res += "?" + u.RawQuery
+			}
+
 		}
+
 		// Handle potential leading slash if original path didn't have one and "file:" was added
 		// Example: input "my.db", parsed as "file:my.db", Path is "my.db" - correct.
 		// Example: input "/tmp/my.db", parsed as "file:/tmp/my.db", Path is "/tmp/my.db" - correct.
