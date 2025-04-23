@@ -14,6 +14,85 @@ KUBERNETES_SERVER_FILE = kubernetes/server.yml
 # Directory for binaries
 BIN_DIR = bin
 
+# Go source files for each application
+SERVER_SRC = $(shell find cmd/server internal -name '*.go') # Include internal for dependencies
+WORKER_SRC = $(shell find cmd/worker internal -name '*.go') # Include internal for dependencies
+CLEANUP_SRC = $(shell find cmd/cleanup internal -name '*.go') # Include internal for dependencies
+
+# Proto files and generated Go files
+PROTO_FILE = internal/grpc/service.proto
+PROTO_GO_FILES = internal/grpc/service.pb.go internal/grpc/service_grpc.pb.go
+
+# Default target: build all applications
+.PHONY: all
+all: build
+
+# Build all applications
+.PHONY: build
+build: $(BIN_DIR)/server $(BIN_DIR)/worker $(BIN_DIR)/cleanup
+
+# Generate gRPC code from proto file
+.PHONY: proto
+proto: $(PROTO_GO_FILES)
+
+$(PROTO_GO_FILES): $(PROTO_FILE)
+	# Ensure the gRPC code generator plugin is installed
+	@echo "Installing/updating protoc-gen-go-grpc..."
+	@go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+	@echo "Generating gRPC code..."
+	@protoc --go_out=. --go_opt=paths=source_relative \
+	       --go-grpc_out=. --go-grpc_opt=paths=source_relative \
+	       $(PROTO_FILE)
+
+# Ensure bin directory exists
+$(BIN_DIR):
+	@mkdir -p $(BIN_DIR)
+
+# Build the server application
+$(BIN_DIR)/server: $(SERVER_SRC) $(PROTO_GO_FILES) | $(BIN_DIR)
+	@echo "Building server application..."
+	@CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o $@ ./cmd/server
+
+# Build the worker application
+$(BIN_DIR)/worker: $(WORKER_SRC) $(PROTO_GO_FILES) | $(BIN_DIR)
+	@echo "Building worker application..."
+	@CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o $@ ./cmd/worker
+
+# Build the cleanup application
+$(BIN_DIR)/cleanup: $(CLEANUP_SRC) | $(BIN_DIR)
+	@echo "Building cleanup application..."
+	@CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o $@ ./cmd/cleanup
+
+# --- Docker Targets ---
+
+# Build all docker images
+.PHONY: docker-build
+docker-build: docker-build-server docker-build-worker docker-build-cleanup
+
+# Build server docker image
+# Build target now tags with both local registry and ECR registry for flexibility
+.PHONY: docker-build-server
+docker-build-server: $(BIN_DIR)/server $(SERVER_DOCKERFILE)
+	@echo "Building server Docker image: $(SERVER_IMAGE) and $(ECR_SERVER_IMAGE)"
+	@docker build -f $(SERVER_DOCKERFILE) -t $(SERVER_IMAGE) -t $(ECR_SERVER_IMAGE) .
+
+# Build worker docker image
+.PHONY: docker-build-worker
+docker-build-worker: $(BIN_DIR)/worker $(WORKER_DOCKERFILE)
+	@echo "Building worker Docker image: $(WORKER_IMAGE) and $(ECR_WORKER_IMAGE)"
+	@docker build -f $(WORKER_DOCKERFILE) -t $(WORKER_IMAGE) -t $(ECR_WORKER_IMAGE) .
+
+# Build cleanup docker image
+.PHONY: docker-build-cleanup
+docker-build-cleanup: $(BIN_DIR)/cleanup $(CLEANUP_DOCKERFILE)
+	@echo "Building cleanup Docker image: $(CLEANUP_IMAGE) and $(ECR_CLEANUP_IMAGE)"
+	@docker build -f $(CLEANUP_DOCKERFILE) -t $(CLEANUP_IMAGE) -t $(ECR_CLEANUP_IMAGE) .
+
+# Clean up docker images (includes ECR tags if they exist locally)
+.PHONY: docker-clean
+docker-clean:
+	@echo "Removing Docker images..."
+	-@docker rmi $(SERVER_IMAGE) $(WORKER_IMAGE) $(CLEANUP_IMAGE) $(ECR_SERVER_IMAGE) $(ECR_WORKER_IMAGE) $(ECR_CLEANUP_IMAGE) 2>/dev/null || true
 
 # --- ECR Push Targets ---
 
@@ -92,6 +171,28 @@ deploy-server: ecr-push-server
 
 # Clean up generated files and binaries
 .PHONY: clean
+clean:
+	@echo "Cleaning up Go binaries and generated proto files..."
+	@rm -rf $(BIN_DIR)
+	@rm -f $(PROTO_GO_FILES)
+	@echo "Consider running 'make docker-clean' to remove Docker images."
+
+# Run applications (optional convenience targets)
+.PHONY: run-server
+run-server: $(BIN_DIR)/server
+	@echo "Running server..."
+	@$(BIN_DIR)/server
+
+.PHONY: run-worker
+run-worker: $(BIN_DIR)/worker
+	@echo "Running worker..."
+	@# Add necessary environment variables like WORKER_AUTH_TOKEN here
+	@$(BIN_DIR)/worker
+
+.PHONY: run-cleanup
+run-cleanup: $(BIN_DIR)/cleanup
+	@echo "Running cleanup..."
+	@$(BIN_DIR)/cleanup
 
 
 # Help target
