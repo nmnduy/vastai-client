@@ -1,3 +1,25 @@
+# ECR
+AWS_REGISTRY_URL=073692673157.dkr.ecr.ap-southeast-1.amazonaws.com
+AWS_REGION=ap-southeast-1
+
+# Project name vastai-client
+PROJECT_NAME = vastai-client
+
+# Read version from VERSION file
+VERSION := $(shell cat VERSION)
+
+# Docker related variables
+# Define your docker registry/username here
+DOCKER_REGISTRY ?= localhost:30050
+SERVER_IMAGE = $(DOCKER_REGISTRY)/$(PROJECT_NAME)-server:$(VERSION)
+WORKER_IMAGE = $(DOCKER_REGISTRY)/$(PROJECT_NAME)-worker:$(VERSION)
+CLEANUP_IMAGE = $(DOCKER_REGISTRY)/$(PROJECT_NAME)-cleanup:$(VERSION)
+
+# Define ECR image names
+ECR_SERVER_IMAGE = $(AWS_REGISTRY_URL)/$(PROJECT_NAME)-server:$(VERSION)
+ECR_WORKER_IMAGE = $(AWS_REGISTRY_URL)/$(PROJECT_NAME)-worker:$(VERSION)
+ECR_CLEANUP_IMAGE = $(AWS_REGISTRY_URL)/$(PROJECT_NAME)-cleanup:$(VERSION)
+
 # Define ECR repository names based on project name
 ECR_SERVER_REPO_NAME = $(PROJECT_NAME)-server
 ECR_WORKER_REPO_NAME = $(PROJECT_NAME)-worker
