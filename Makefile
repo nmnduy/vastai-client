@@ -1,3 +1,7 @@
+# ECR
+AWS_REGISTRY_URL=073692673157.dkr.ecr.ap-southeast-1.amazonaws.com
+AWS_REGION=ap-southeast-1
+
 # Project name vastai-client
 PROJECT_NAME = vastai-client
 
@@ -10,6 +14,17 @@ DOCKER_REGISTRY ?= localhost:30050
 SERVER_IMAGE = $(DOCKER_REGISTRY)/$(PROJECT_NAME)-server:$(VERSION)
 WORKER_IMAGE = $(DOCKER_REGISTRY)/$(PROJECT_NAME)-worker:$(VERSION)
 CLEANUP_IMAGE = $(DOCKER_REGISTRY)/$(PROJECT_NAME)-cleanup:$(VERSION)
+
+# Define ECR image names
+ECR_SERVER_IMAGE = $(AWS_REGISTRY_URL)/$(PROJECT_NAME)-server:$(VERSION)
+ECR_WORKER_IMAGE = $(AWS_REGISTRY_URL)/$(PROJECT_NAME)-worker:$(VERSION)
+ECR_CLEANUP_IMAGE = $(AWS_REGISTRY_URL)/$(PROJECT_NAME)-cleanup:$(VERSION)
+
+# Define ECR repository names based on project name
+ECR_SERVER_REPO_NAME = $(PROJECT_NAME)-server
+ECR_WORKER_REPO_NAME = $(PROJECT_NAME)-worker
+ECR_CLEANUP_REPO_NAME = $(PROJECT_NAME)-cleanup
+
 # Dockerfiles
 SERVER_DOCKERFILE = docker/Dockerfile.server
 WORKER_DOCKERFILE = docker/Dockerfile.worker
@@ -74,51 +89,84 @@ $(BIN_DIR)/cleanup: $(CLEANUP_SRC) | $(BIN_DIR)
 docker-build: docker-build-server docker-build-worker docker-build-cleanup
 
 # Build server docker image
+# Build target now tags with both local registry and ECR registry for flexibility
 .PHONY: docker-build-server
 docker-build-server: $(BIN_DIR)/server $(SERVER_DOCKERFILE)
-	@echo "Building server Docker image: $(SERVER_IMAGE)"
-	@docker build -f $(SERVER_DOCKERFILE) -t $(SERVER_IMAGE) .
+	@echo "Building server Docker image: $(SERVER_IMAGE) and $(ECR_SERVER_IMAGE)"
+	@docker build -f $(SERVER_DOCKERFILE) -t $(SERVER_IMAGE) -t $(ECR_SERVER_IMAGE) .
 
 # Build worker docker image
 .PHONY: docker-build-worker
 docker-build-worker: $(BIN_DIR)/worker $(WORKER_DOCKERFILE)
-	@echo "Building worker Docker image: $(WORKER_IMAGE)"
-	@docker build -f $(WORKER_DOCKERFILE) -t $(WORKER_IMAGE) .
+	@echo "Building worker Docker image: $(WORKER_IMAGE) and $(ECR_WORKER_IMAGE)"
+	@docker build -f $(WORKER_DOCKERFILE) -t $(WORKER_IMAGE) -t $(ECR_WORKER_IMAGE) .
 
 # Build cleanup docker image
 .PHONY: docker-build-cleanup
 docker-build-cleanup: $(BIN_DIR)/cleanup $(CLEANUP_DOCKERFILE)
-	@echo "Building cleanup Docker image: $(CLEANUP_IMAGE)"
-	@docker build -f $(CLEANUP_DOCKERFILE) -t $(CLEANUP_IMAGE) .
+	@echo "Building cleanup Docker image: $(CLEANUP_IMAGE) and $(ECR_CLEANUP_IMAGE)"
+	@docker build -f $(CLEANUP_DOCKERFILE) -t $(CLEANUP_IMAGE) -t $(ECR_CLEANUP_IMAGE) .
 
-# Push all docker images
-.PHONY: docker-push
-docker-push: docker-push-server docker-push-worker docker-push-cleanup
-
-# Push server docker image
-.PHONY: docker-push-server
-docker-push-server: docker-build-server
-	@echo "Pushing server Docker image: $(SERVER_IMAGE)"
-	@docker push $(SERVER_IMAGE)
-
-# Push worker docker image
-.PHONY: docker-push-worker
-docker-push-worker: docker-build-worker
-	@echo "Pushing worker Docker image: $(WORKER_IMAGE)"
-	@docker push $(WORKER_IMAGE)
-
-# Push cleanup docker image
-.PHONY: docker-push-cleanup
-docker-push-cleanup: docker-build-cleanup
-	@echo "Pushing cleanup Docker image: $(CLEANUP_IMAGE)"
-	@docker push $(CLEANUP_IMAGE)
-
-# Clean up docker images
+# Clean up docker images (includes ECR tags if they exist locally)
 .PHONY: docker-clean
 docker-clean:
 	@echo "Removing Docker images..."
-	-@docker rmi $(SERVER_IMAGE) $(WORKER_IMAGE) $(CLEANUP_IMAGE) 2>/dev/null || true
+	-@docker rmi $(SERVER_IMAGE) $(WORKER_IMAGE) $(CLEANUP_IMAGE) $(ECR_SERVER_IMAGE) $(ECR_WORKER_IMAGE) $(ECR_CLEANUP_IMAGE) 2>/dev/null || true
 
+# --- ECR Push Targets ---
+
+# Login to AWS ECR
+.PHONY: ecr-login
+ecr-login:
+	@echo "Logging into AWS ECR $(AWS_REGISTRY_URL)..."
+	@aws ecr get-login-password --region $(AWS_REGION) | docker login --username AWS --password-stdin $(AWS_REGISTRY_URL)
+
+.PHONY: ensure-ecr-repo-server
+ensure-ecr-repo-server:
+	@echo "Checking/Creating ECR repository: $(ECR_SERVER_REPO_NAME)..."
+	@aws ecr describe-repositories --repository-names $(ECR_SERVER_REPO_NAME) --region $(AWS_REGION) > /dev/null 2>&1 || \
+		(echo "Repository $(ECR_SERVER_REPO_NAME) not found, creating..." && \
+		 aws ecr create-repository --repository-name $(ECR_SERVER_REPO_NAME) --region $(AWS_REGION) --image-scanning-configuration scanOnPush=true > /dev/null)
+
+.PHONY: ensure-ecr-repo-worker
+ensure-ecr-repo-worker:
+	@echo "Checking/Creating ECR repository: $(ECR_WORKER_REPO_NAME)..."
+	@aws ecr describe-repositories --repository-names $(ECR_WORKER_REPO_NAME) --region $(AWS_REGION) > /dev/null 2>&1 || \
+		(echo "Repository $(ECR_WORKER_REPO_NAME) not found, creating..." && \
+		 aws ecr create-repository --repository-name $(ECR_WORKER_REPO_NAME) --region $(AWS_REGION) --image-scanning-configuration scanOnPush=true > /dev/null)
+
+.PHONY: ensure-ecr-repo-cleanup
+ensure-ecr-repo-cleanup:
+	@echo "Checking/Creating ECR repository: $(ECR_CLEANUP_REPO_NAME)..."
+	@aws ecr describe-repositories --repository-names $(ECR_CLEANUP_REPO_NAME) --region $(AWS_REGION) > /dev/null 2>&1 || \
+		(echo "Repository $(ECR_CLEANUP_REPO_NAME) not found, creating..." && \
+		 aws ecr create-repository --repository-name $(ECR_CLEANUP_REPO_NAME) --region $(AWS_REGION) --image-scanning-configuration scanOnPush=true > /dev/null)
+
+# Push all docker images to AWS ECR
+.PHONY: ecr-push
+# Depends on individual push targets which now handle repo creation
+ecr-push: ecr-push-server ecr-push-worker ecr-push-cleanup
+
+# Push server docker image to AWS ECR
+.PHONY: ecr-push-server
+# Depends on build, login, and ensuring the repo exists
+ecr-push-server: docker-build-server ecr-login ensure-ecr-repo-server
+	@echo "Pushing server Docker image to ECR: $(ECR_SERVER_IMAGE)"
+	@docker push $(ECR_SERVER_IMAGE)
+
+# Push worker docker image to AWS ECR
+.PHONY: ecr-push-worker
+# Depends on build, login, and ensuring the repo exists
+ecr-push-worker: docker-build-worker ecr-login ensure-ecr-repo-worker
+	@echo "Pushing worker Docker image to ECR: $(ECR_WORKER_IMAGE)"
+	@docker push $(ECR_WORKER_IMAGE)
+
+# Push cleanup docker image to AWS ECR
+.PHONY: ecr-push-cleanup
+# Depends on build, login, and ensuring the repo exists
+ecr-push-cleanup: docker-build-cleanup ecr-login ensure-ecr-repo-cleanup
+	@echo "Pushing cleanup Docker image to ECR: $(ECR_CLEANUP_IMAGE)"
+	@docker push $(ECR_CLEANUP_IMAGE)
 
 # Clean up generated files and binaries
 .PHONY: clean
@@ -145,6 +193,7 @@ run-cleanup: $(BIN_DIR)/cleanup
 	@echo "Running cleanup..."
 	@$(BIN_DIR)/cleanup
 
+
 # Help target
 .PHONY: help
 help:
@@ -155,22 +204,28 @@ help:
 	@echo "  server              Build the server application"
 	@echo "  worker              Build the worker application"
 	@echo "  cleanup             Build the cleanup application"
-	@echo "  docker-build        Build all Docker images"
+	@echo "  docker-build        Build all Docker images (tags for local and ECR)"
 	@echo "  docker-build-server Build the server Docker image"
 	@echo "  docker-build-worker Build the worker Docker image"
 	@echo "  docker-build-cleanup Build the cleanup Docker image"
-	@echo "  docker-push         Push all Docker images to the registry ($(DOCKER_REGISTRY))"
-	@echo "  docker-push-server  Push the server Docker image"
-	@echo "  docker-push-worker  Push the worker Docker image"
-	@echo "  docker-push-cleanup Push the cleanup Docker image"
+	@echo "  docker-push         Push all Docker images to the local registry ($(DOCKER_REGISTRY))"
+	@echo "  docker-push-server  Push the server Docker image to the local registry"
+	@echo "  docker-push-worker  Push the worker Docker image to the local registry"
+	@echo "  docker-push-cleanup Push the cleanup Docker image to the local registry"
+	@echo "  ecr-login           Log in to AWS ECR ($(AWS_REGISTRY_URL))"
+	@echo "  ecr-push            Push all Docker images to AWS ECR ($(AWS_REGISTRY_URL))"
+	@echo "  ecr-push-server     Push the server Docker image to AWS ECR"
+	@echo "  ecr-push-worker     Push the worker Docker image to AWS ECR"
+	@echo "  ecr-push-cleanup    Push the cleanup Docker image to AWS ECR"
 	@echo "  run-server          Run the server application locally"
 	@echo "  run-worker          Run the worker application locally"
 	@echo "  run-cleanup         Run the cleanup application locally"
 	@echo "  clean               Remove generated Go files and binaries"
-	@echo "  docker-clean        Remove built Docker images locally"
+	@echo "  docker-clean        Remove built Docker images locally (both local and ECR tags)"
 	@echo "  help                Show this help message"
 	@echo ""
 	@echo "Configuration:"
-	@echo "  DOCKER_REGISTRY     Set the Docker registry/username (current: $(DOCKER_REGISTRY))"
+	@echo "  DOCKER_REGISTRY     Set the default Docker registry/username (current: $(DOCKER_REGISTRY))"
 	@echo "                      Example: make docker-push DOCKER_REGISTRY=myuser"
-
+	@echo "  AWS_REGISTRY_URL    AWS ECR registry URL (current: $(AWS_REGISTRY_URL))"
+	@echo "  AWS_REGION          AWS Region for ECR login (current: $(AWS_REGION))"
