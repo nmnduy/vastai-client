@@ -1,0 +1,197 @@
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: vastai-db-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 200Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vastai-client-server
+  labels:
+    app: vastai-client-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vastai-client-server
+  template:
+    metadata:
+      labels:
+        app: vastai-client-server
+    spec:
+      volumes:
+      - name: db-storage
+        persistentVolumeClaim:
+          claimName: vastai-db-pvc
+      containers:
+      - name: server
+        image: 073692673157.dkr.ecr.ap-southeast-1.amazonaws.com/vastai-client-server:v0.0.3
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 50051
+          name: grpc
+          protocol: TCP
+        volumeMounts:
+        - name: db-storage
+          mountPath: /data
+        env:
+          - name: DATABASE_URL
+            value: "/data/vastai_status.db"
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+        livenessProbe:
+          tcpSocket:
+            port: grpc
+          initialDelaySeconds: 25
+          periodSeconds: 20
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          tcpSocket:
+            port: grpc
+          initialDelaySeconds: 15
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+
+---
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: litestream-config
+data:
+  litestream.yml: |
+    access-key-id: ${LITESTREAM_ACCESS_KEY_ID}
+    secret-access-key: ${LITESTREAM_SECRET_ACCESS_KEY}
+
+    dbs:
+      - path: /data/vastai_status.db
+        replicas:
+          - type: s3
+            bucket: vastai-client
+            path: vastai_client.db
+            endpoint: https://d1d69208d12bdf919319004fa00204c5.r2.cloudflarestorage.com
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: litestream-replicator
+  labels:
+    app: litestream-replicator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: litestream-replicator
+  template:
+    metadata:
+      labels:
+        app: litestream-replicator
+    spec:
+      volumes:
+      - name: db-storage
+        persistentVolumeClaim:
+          claimName: vastai-db-pvc
+      - name: config-volume
+        configMap:
+          name: litestream-config
+      containers:
+      - name: litestream
+        image: litestream/litestream:latest
+        args:
+          - "replicate"
+          - "-config"
+          - "/etc/litestream.yml"
+        env:
+          - name: LITESTREAM_ACCESS_KEY_ID
+            valueFrom:
+              secretKeyRef:
+                name: r2-credentials
+                key: LITESTREAM_ACCESS_KEY_ID
+          - name: LITESTREAM_SECRET_ACCESS_KEY
+            valueFrom:
+              secretKeyRef:
+                name: r2-credentials
+                key: LITESTREAM_SECRET_ACCESS_KEY
+        volumeMounts:
+          - name: db-storage
+            mountPath: /data
+          - name: config-volume
+            mountPath: /etc/litestream.yml
+            subPath: litestream.yml
+            readOnly: true
+        resources:
+          requests:
+            cpu: "50m"
+            memory: "64Mi"
+          limits:
+            cpu: "100m"
+            memory: "128Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vastai-client-server-service
+  labels:
+    app: vastai-client-server
+spec:
+  selector:
+    app: vastai-client-server
+  ports:
+    - protocol: TCP
+      port: 50051
+      targetPort: grpc
+      name: grpc
+  type: ClusterIP
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sqlite-inspector
+  labels:
+    app: sqlite-inspector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sqlite-inspector
+  template:
+    metadata:
+      labels:
+        app: sqlite-inspector
+    spec:
+      volumes:
+        - name: db-storage
+          persistentVolumeClaim:
+            claimName: vastai-db-pvc
+      containers:
+      - name: inspector
+        image: ubuntu:latest
+        command: ["/bin/sh", "-c"]
+        args:
+          - apt-get update && apt-get install -y sqlite3 && echo 'SQLite3 installed. Sleeping indefinitely...' && sleep infinity
+        volumeMounts:
+          - name: db-storage
+            mountPath: /data
+        resources:
+          requests:
+            cpu: "50m"
+            memory: "64Mi"
+          limits:
+            cpu: "100m"
+            memory: "128Mi"

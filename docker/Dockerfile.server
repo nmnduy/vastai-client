@@ -1,0 +1,43 @@
+# --- Build Stage ---
+FROM golang:1.23-alpine AS builder
+
+# Install build dependencies
+# protoc is needed to compile proto files
+# build-base (gcc) and sqlite-dev are needed for CGO (go-sqlite3)
+RUN apk add --no-cache git build-base protobuf-dev sqlite-dev
+
+WORKDIR /app
+
+# Copy go module files and download dependencies first to leverage Docker cache
+COPY go.mod go.sum ./
+# Ensure CGO is enabled so sqlite3 can be downloaded/built correctly if needed
+RUN CGO_ENABLED=1 go mod download
+
+# Generate proto files inside the builder if they aren't checked into git
+# This ensures the build environment has the generated code without relying on the host
+COPY internal/grpc/service.proto internal/grpc/service.proto
+# Install Go gRPC generators
+RUN go install google.golang.org/protobuf/cmd/protoc-gen-go@latest && \
+    go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+# Run protoc to generate Go code from the proto file
+RUN protoc --go_out=. --go_opt=paths=source_relative \
+           --go-grpc_out=. --go-grpc_opt=paths=source_relative \
+           internal/grpc/service.proto
+
+# Copy the rest of the application source code
+COPY . .
+
+# Build the server binary
+# Enable CGO since go-sqlite3 requires it.
+# Use -ldflags="-w -s" to strip debug symbols and reduce binary size for production.
+RUN CGO_ENABLED=1 go build -ldflags="-w -s" -o /server ./cmd/server
+
+# --- Runtime Stage ---
+FROM alpine:3.19
+
+# Install runtime dependencies for the CGO binary (sqlite3)
+RUN apk add --no-cache sqlite-libs
+
+COPY --from=builder /server /server
+
+ENTRYPOINT ["/server"]
