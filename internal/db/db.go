@@ -220,6 +220,13 @@ func (db *DB) GetInstanceStatus(ctx context.Context, vastAIID int) (*InstanceSta
 	return &instanceStatus, nil
 }
 
+// CreateJob inserts the initial 'created' status record for a new job.
+func (db *DB) CreateJob(ctx context.Context, jobID string, input *string) error {
+	// A new job starts in the 'created' state and is not assigned to an instance yet.
+	// instanceID is nil, error is nil, result is nil.
+	return db.InsertJobStatus(ctx, jobID, "created", nil, input)
+}
+
 // InsertJobStatus inserts a new job status record into the database.
 func (db *DB) InsertJobStatus(ctx context.Context, jobID, status string, instanceID *int64, input *string) error {
 	// Use CURRENT_TIMESTAMP for SQLite and ? for placeholders
